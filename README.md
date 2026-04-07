@@ -130,16 +130,24 @@ Repo URLs are resolved in this order:
 2. `$GRAB_REPO` environment variable
 3. `~/.config/grab/config` (set via `grab setup`)
 
+The default branch used by `grab update` / `grab install` follows the same resolution (defaults to `main`):
+
+1. `.grabfile` (the `branch=` line)
+2. `$GRAB_BRANCH` environment variable
+3. `~/.config/grab/config` (the `branch=` line)
+
 The global config file looks like:
 
 ```
 # grab global configuration
 repo=git@github.com:you/tools.git
 grab_repo=git@github.com:you/grab.git
+branch=main
 ```
 
 - `repo` — your tools monorepo (default for `grab init`)
 - `grab_repo` — where the `grab` script lives, used by `grab self-update`
+- `branch` — default branch to track in the tools repo (optional, defaults to `main`)
 
 ## Files grab creates
 

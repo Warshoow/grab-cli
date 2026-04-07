@@ -74,11 +74,32 @@ ensure_repo() {
     fi
 }
 
+get_default_branch() {
+    # Priority: .grabfile branch > GRAB_BRANCH env > global config > "main"
+    if [[ -f "$GRAB_FILE" ]]; then
+        local b
+        b=$(grep '^branch=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
+        [[ -n "$b" ]] && echo "$b" && return
+    fi
+    if [[ -n "${GRAB_BRANCH:-}" ]]; then
+        echo "$GRAB_BRANCH"
+        return
+    fi
+    if [[ -f "$GRAB_GLOBAL_CONFIG" ]]; then
+        local b
+        b=$(grep '^branch=' "$GRAB_GLOBAL_CONFIG" | head -1 | cut -d'=' -f2-)
+        [[ -n "$b" ]] && echo "$b" && return
+    fi
+    echo "main"
+}
+
 sync_repo() {
+    local branch
+    branch=$(get_default_branch)
     cd "$GRAB_REPO_DIR"
-    git fetch origin main --quiet 2>/dev/null
-    git checkout main --quiet 2>/dev/null || true
-    git pull origin main --quiet 2>/dev/null
+    git fetch origin "$branch" --quiet 2>/dev/null
+    git checkout "$branch" --quiet 2>/dev/null || true
+    git pull origin "$branch" --quiet 2>/dev/null
     cd - > /dev/null
 }
 
@@ -643,6 +664,11 @@ ${BOLD}CONFIG${NC}
     1. ${CYAN}.grabfile${NC} (repo= line)
     2. ${CYAN}\$GRAB_REPO${NC} env variable
     3. ${CYAN}~/.config/grab/config${NC} (global, set with ${CYAN}grab setup${NC})
+
+  Default branch is resolved the same way (defaults to ${CYAN}main${NC}):
+    1. ${CYAN}.grabfile${NC} (branch= line)
+    2. ${CYAN}\$GRAB_BRANCH${NC} env variable
+    3. ${CYAN}~/.config/grab/config${NC} (branch= line)
 
 ${BOLD}FILES${NC}
   ${CYAN}.grabfile${NC}              Manifest tracking repo & tools
