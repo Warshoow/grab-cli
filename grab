@@ -1,0 +1,680 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────
+# grab — Pull individual tools from a monorepo into any project
+# ─────────────────────────────────────────────────────────────
+
+GRAB_VERSION="1.1.0"
+GRAB_DIR=".grab"
+GRAB_FILE=".grabfile"
+GRAB_REPO_DIR=".grab/.repo"
+GRAB_GLOBAL_CONFIG="${HOME}/.config/grab/config"
+GRAB_BIN="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+
+# ── Colors ───────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ── Helpers ──────────────────────────────────────────────────
+info()    { echo -e "${BLUE}▸${NC} $*"; }
+success() { echo -e "${GREEN}✔${NC} $*"; }
+warn()    { echo -e "${YELLOW}⚠${NC} $*"; }
+error()   { echo -e "${RED}✖${NC} $*" >&2; }
+die()     { error "$@"; exit 1; }
+
+# ── Config ───────────────────────────────────────────────────
+get_repo_url() {
+    # Priority: .grabfile repo > GRAB_REPO env > global config
+    if [[ -f "$GRAB_FILE" ]]; then
+        local url
+        url=$(grep '^repo=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
+        [[ -n "$url" ]] && echo "$url" && return
+    fi
+    if [[ -n "${GRAB_REPO:-}" ]]; then
+        echo "$GRAB_REPO"
+        return
+    fi
+    if [[ -f "$GRAB_GLOBAL_CONFIG" ]]; then
+        local url
+        url=$(grep '^repo=' "$GRAB_GLOBAL_CONFIG" | head -1 | cut -d'=' -f2-)
+        [[ -n "$url" ]] && echo "$url" && return
+    fi
+    die "No repo configured. Run: ${BOLD}grab init <repo-url>${NC}"
+}
+
+ensure_repo() {
+    local repo_url
+    repo_url=$(get_repo_url)
+
+    if [[ ! -d "$GRAB_REPO_DIR/.git" ]]; then
+        info "Cloning tools repo (sparse)..."
+        mkdir -p "$GRAB_DIR"
+        git clone --no-checkout --filter=blob:none "$repo_url" "$GRAB_REPO_DIR" 2>/dev/null
+        cd "$GRAB_REPO_DIR"
+        git sparse-checkout init --cone
+        git sparse-checkout set '!/*'  # start with nothing
+        cd - > /dev/null
+        success "Repo initialized"
+    else
+        # Ensure remote URL is up to date
+        cd "$GRAB_REPO_DIR"
+        local current_url
+        current_url=$(git remote get-url origin 2>/dev/null || true)
+        if [[ "$current_url" != "$repo_url" ]]; then
+            git remote set-url origin "$repo_url"
+        fi
+        cd - > /dev/null
+    fi
+}
+
+sync_repo() {
+    cd "$GRAB_REPO_DIR"
+    git fetch origin main --quiet 2>/dev/null
+    git checkout main --quiet 2>/dev/null || true
+    git pull origin main --quiet 2>/dev/null
+    cd - > /dev/null
+}
+
+# ── Grabfile management ──────────────────────────────────────
+grabfile_init() {
+    local repo_url="$1"
+    cat > "$GRAB_FILE" <<EOF
+repo=${repo_url}
+# Tools are listed below, one per line
+# format: tool_name [@branch_or_tag]
+EOF
+    success "Created ${BOLD}${GRAB_FILE}${NC}"
+}
+
+grabfile_add() {
+    local tool="$1"
+    local ref="${2:-}"
+
+    if [[ ! -f "$GRAB_FILE" ]]; then
+        die "No .grabfile found. Run: ${BOLD}grab init <repo-url>${NC}"
+    fi
+
+    # Check if already listed
+    if grep -q "^${tool}\b" "$GRAB_FILE" 2>/dev/null; then
+        warn "${tool} already in .grabfile"
+        return
+    fi
+
+    if [[ -n "$ref" ]]; then
+        echo "${tool} @${ref}" >> "$GRAB_FILE"
+    else
+        echo "${tool}" >> "$GRAB_FILE"
+    fi
+}
+
+grabfile_remove() {
+    local tool="$1"
+    if [[ ! -f "$GRAB_FILE" ]]; then return; fi
+    # Remove the line matching this tool
+    local tmp
+    tmp=$(mktemp)
+    grep -v "^${tool}\b" "$GRAB_FILE" > "$tmp" || true
+    mv "$tmp" "$GRAB_FILE"
+}
+
+grabfile_list_tools() {
+    if [[ ! -f "$GRAB_FILE" ]]; then return; fi
+    grep -v '^#' "$GRAB_FILE" | grep -v '^repo=' | grep -v '^\s*$' | awk '{print $1}'
+}
+
+grabfile_get_ref() {
+    local tool="$1"
+    if [[ ! -f "$GRAB_FILE" ]]; then echo ""; return; fi
+    local line
+    line=$(grep "^${tool}\b" "$GRAB_FILE" | head -1)
+    echo "$line" | grep -oP '@\K\S+' || echo ""
+}
+
+# ── Gitignore management ────────────────────────────────────
+gitignore_ensure() {
+    local entry="$1"
+    local gitignore=".gitignore"
+
+    [[ ! -f "$gitignore" ]] && touch "$gitignore"
+
+    if ! grep -qxF "$entry" "$gitignore" 2>/dev/null; then
+        # Add a grab section if it doesn't exist
+        if ! grep -q "# grab" "$gitignore" 2>/dev/null; then
+            echo "" >> "$gitignore"
+            echo "# grab" >> "$gitignore"
+        fi
+        echo "$entry" >> "$gitignore"
+    fi
+}
+
+gitignore_remove() {
+    local entry="$1"
+    local gitignore=".gitignore"
+    [[ ! -f "$gitignore" ]] && return
+
+    local tmp
+    tmp=$(mktemp)
+    grep -vxF "$entry" "$gitignore" > "$tmp" || true
+    mv "$tmp" "$gitignore"
+
+    # Clean up empty grab section
+    if grep -q "# grab" ".gitignore" 2>/dev/null; then
+        local after_grab
+        after_grab=$(sed -n '/# grab/,$ p' ".gitignore" | tail -n +2 | grep -v '^\s*$' | wc -l)
+        if [[ "$after_grab" -eq 0 ]]; then
+            tmp=$(mktemp)
+            sed '/# grab/d' ".gitignore" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "$tmp"
+            mv "$tmp" ".gitignore"
+        fi
+    fi
+}
+
+# ── Commands ─────────────────────────────────────────────────
+
+cmd_init() {
+    local repo_url="${1:-}"
+    [[ -z "$repo_url" ]] && die "Usage: ${BOLD}grab init <repo-url>${NC}"
+
+    if [[ -f "$GRAB_FILE" ]]; then
+        warn ".grabfile already exists"
+        read -rp "Overwrite? [y/N] " confirm
+        [[ "$confirm" != [yY] ]] && exit 0
+    fi
+
+    mkdir -p "$GRAB_DIR"
+    grabfile_init "$repo_url"
+    gitignore_ensure "$GRAB_DIR/"
+    success "Grab initialized with repo: ${CYAN}${repo_url}${NC}"
+}
+
+cmd_add() {
+    local tool="${1:-}"
+    local ref="${2:-}"
+    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab add <tool> [@branch/tag]${NC}"
+
+    # Strip leading @ if user passed it
+    ref="${ref#@}"
+
+    ensure_repo
+
+    # Fetch & checkout the specific tool
+    cd "$GRAB_REPO_DIR"
+
+    if [[ -n "$ref" ]]; then
+        git fetch origin "$ref" --quiet 2>/dev/null || die "Ref '${ref}' not found"
+        git checkout "$ref" --quiet 2>/dev/null
+    else
+        sync_repo
+        cd - > /dev/null
+        cd "$GRAB_REPO_DIR"
+    fi
+
+    # Check the tool exists in the repo
+    if ! git ls-tree -d HEAD "$tool" &>/dev/null; then
+        cd - > /dev/null
+        die "Tool '${tool}' not found in repo. Run ${BOLD}grab list --remote${NC} to see available tools."
+    fi
+
+    # Add to sparse checkout
+    git sparse-checkout add "$tool" 2>/dev/null
+    cd - > /dev/null
+
+    # Copy tool to project
+    if [[ -d "${GRAB_REPO_DIR}/${tool}" ]]; then
+        mkdir -p "${GRAB_DIR}/tools"
+        rm -rf "${GRAB_DIR}/tools/${tool}"
+        cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
+    else
+        die "Tool directory not found after checkout"
+    fi
+
+    # Update grabfile & gitignore
+    grabfile_add "$tool" "$ref"
+    gitignore_ensure "$GRAB_DIR/"
+
+    local ref_info=""
+    [[ -n "$ref" ]] && ref_info=" ${DIM}@${ref}${NC}"
+    success "Added ${BOLD}${tool}${NC}${ref_info} → ${GRAB_DIR}/tools/${tool}"
+}
+
+cmd_remove() {
+    local tool="${1:-}"
+    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab remove <tool>${NC}"
+
+    if [[ ! -d "${GRAB_DIR}/tools/${tool}" ]]; then
+        die "Tool '${tool}' is not installed"
+    fi
+
+    rm -rf "${GRAB_DIR}/tools/${tool}"
+    grabfile_remove "$tool"
+
+    # Clean sparse checkout
+    if [[ -d "$GRAB_REPO_DIR/.git" ]]; then
+        cd "$GRAB_REPO_DIR"
+        # Rebuild sparse-checkout from remaining tools
+        local remaining
+        remaining=$(cd - > /dev/null && grabfile_list_tools | tr '\n' ' ')
+        if [[ -z "$remaining" ]]; then
+            git sparse-checkout set '!/*' 2>/dev/null
+        else
+            git sparse-checkout set $remaining 2>/dev/null
+        fi
+        cd - > /dev/null
+    fi
+
+    success "Removed ${BOLD}${tool}${NC}"
+}
+
+cmd_update() {
+    local tool="${1:-}"
+
+    ensure_repo
+
+    if [[ -n "$tool" ]]; then
+        # Update single tool
+        if ! grep -q "^${tool}\b" "$GRAB_FILE" 2>/dev/null; then
+            die "Tool '${tool}' is not in .grabfile"
+        fi
+
+        local ref
+        ref=$(grabfile_get_ref "$tool")
+
+        cd "$GRAB_REPO_DIR"
+        if [[ -n "$ref" ]]; then
+            git fetch origin "$ref" --quiet 2>/dev/null
+            git checkout "$ref" --quiet 2>/dev/null
+            git pull origin "$ref" --quiet 2>/dev/null
+        else
+            sync_repo
+            cd - > /dev/null
+            cd "$GRAB_REPO_DIR"
+        fi
+        cd - > /dev/null
+
+        rm -rf "${GRAB_DIR}/tools/${tool}"
+        cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
+        success "Updated ${BOLD}${tool}${NC}"
+    else
+        # Update all tools
+        cd "$GRAB_REPO_DIR"
+        sync_repo
+        cd - > /dev/null
+
+        local count=0
+        while IFS= read -r t; do
+            [[ -z "$t" ]] && continue
+            rm -rf "${GRAB_DIR}/tools/${t}"
+            cp -r "${GRAB_REPO_DIR}/${t}" "${GRAB_DIR}/tools/${t}"
+            info "Updated ${t}"
+            ((count++))
+        done <<< "$(grabfile_list_tools)"
+
+        success "Updated ${BOLD}${count}${NC} tool(s)"
+    fi
+}
+
+cmd_install() {
+    # Install all tools from .grabfile (like npm install)
+    if [[ ! -f "$GRAB_FILE" ]]; then
+        die "No .grabfile found. Run: ${BOLD}grab init <repo-url>${NC}"
+    fi
+
+    ensure_repo
+
+    local count=0
+    while IFS= read -r tool; do
+        [[ -z "$tool" ]] && continue
+
+        local ref
+        ref=$(grabfile_get_ref "$tool")
+
+        cd "$GRAB_REPO_DIR"
+        if [[ -n "$ref" ]]; then
+            git fetch origin "$ref" --quiet 2>/dev/null
+            git checkout "$ref" --quiet 2>/dev/null
+        else
+            sync_repo
+            cd - > /dev/null
+            cd "$GRAB_REPO_DIR"
+        fi
+
+        git sparse-checkout add "$tool" 2>/dev/null
+        cd - > /dev/null
+
+        mkdir -p "${GRAB_DIR}/tools"
+        rm -rf "${GRAB_DIR}/tools/${tool}"
+        cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
+
+        local ref_info=""
+        [[ -n "$ref" ]] && ref_info=" ${DIM}@${ref}${NC}"
+        info "${tool}${ref_info}"
+        ((count++))
+    done <<< "$(grabfile_list_tools)"
+
+    gitignore_ensure "$GRAB_DIR/"
+    success "Installed ${BOLD}${count}${NC} tool(s)"
+}
+
+cmd_list() {
+    local mode="${1:-local}"
+
+    if [[ "$mode" == "--remote" || "$mode" == "-r" ]]; then
+        ensure_repo
+        cd "$GRAB_REPO_DIR"
+        sync_repo
+        cd - > /dev/null
+
+        echo -e "${BOLD}Available tools:${NC}"
+        cd "$GRAB_REPO_DIR"
+        # List top-level directories (each is a tool)
+        for dir in */; do
+            [[ "$dir" == ".git/" ]] && continue
+            local name="${dir%/}"
+            local installed=""
+            if [[ -d "$(cd - 2>/dev/null > /dev/null && echo "${GRAB_DIR}/tools/${name}")" ]]; then
+                installed=" ${GREEN}(installed)${NC}"
+            fi
+            # Check for a description in a README or TOOL.md
+            local desc=""
+            if [[ -f "${name}/TOOL.md" ]]; then
+                desc=$(head -1 "${name}/TOOL.md" | sed 's/^#\s*//')
+            elif [[ -f "${name}/README.md" ]]; then
+                desc=$(head -1 "${name}/README.md" | sed 's/^#\s*//')
+            fi
+            echo -e "  ${CYAN}${name}${NC}${installed}"
+            [[ -n "$desc" ]] && echo -e "    ${DIM}${desc}${NC}"
+        done
+        cd - > /dev/null
+    else
+        if [[ ! -f "$GRAB_FILE" ]]; then
+            die "No .grabfile found"
+        fi
+
+        echo -e "${BOLD}Installed tools:${NC}"
+        local has_tools=false
+        while IFS= read -r tool; do
+            [[ -z "$tool" ]] && continue
+            has_tools=true
+            local ref
+            ref=$(grabfile_get_ref "$tool")
+            local ref_info=""
+            [[ -n "$ref" ]] && ref_info=" ${DIM}@${ref}${NC}"
+            local status="${GREEN}✔${NC}"
+            [[ ! -d "${GRAB_DIR}/tools/${tool}" ]] && status="${RED}✖ (missing, run grab install)${NC}"
+            echo -e "  ${status} ${CYAN}${tool}${NC}${ref_info}"
+        done <<< "$(grabfile_list_tools)"
+
+        if [[ "$has_tools" == false ]]; then
+            echo -e "  ${DIM}No tools installed${NC}"
+        fi
+    fi
+}
+
+cmd_status() {
+    echo -e "${BOLD}grab${NC} v${GRAB_VERSION}\n"
+
+    if [[ -f "$GRAB_FILE" ]]; then
+        local repo_url
+        repo_url=$(grep '^repo=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
+        echo -e "  Repo:   ${CYAN}${repo_url}${NC}"
+    else
+        echo -e "  ${DIM}No .grabfile found${NC}"
+        return
+    fi
+
+    local tool_count=0
+    while IFS= read -r tool; do
+        [[ -z "$tool" ]] && continue
+        ((tool_count++))
+    done <<< "$(grabfile_list_tools)"
+
+    echo -e "  Tools:  ${BOLD}${tool_count}${NC} installed"
+    echo -e "  Dir:    ${GRAB_DIR}/tools/"
+    echo ""
+    cmd_list
+}
+
+cmd_path() {
+    local tool="${1:-}"
+    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab path <tool>${NC}"
+
+    local tool_path="${GRAB_DIR}/tools/${tool}"
+    if [[ ! -d "$tool_path" ]]; then
+        die "Tool '${tool}' is not installed"
+    fi
+
+    # Print absolute path (useful for scripts/docker)
+    echo "$(cd "$tool_path" && pwd)"
+}
+
+cmd_exec() {
+    local tool="${1:-}"
+    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab exec <tool> [args...]${NC}"
+    shift
+
+    local tool_path="${GRAB_DIR}/tools/${tool}"
+    if [[ ! -d "$tool_path" ]]; then
+        die "Tool '${tool}' is not installed"
+    fi
+
+    # Look for an entrypoint: run.sh, main.sh, or the tool name
+    local entrypoint=""
+    for candidate in "run.sh" "main.sh" "${tool}.sh" "entrypoint.sh"; do
+        if [[ -f "${tool_path}/${candidate}" ]]; then
+            entrypoint="${tool_path}/${candidate}"
+            break
+        fi
+    done
+
+    if [[ -z "$entrypoint" ]]; then
+        die "No entrypoint found in ${tool}. Expected: run.sh, main.sh, or ${tool}.sh"
+    fi
+
+    chmod +x "$entrypoint"
+    exec "$entrypoint" "$@"
+}
+
+cmd_clean() {
+    if [[ -d "$GRAB_REPO_DIR" ]]; then
+        rm -rf "$GRAB_REPO_DIR"
+        success "Cleaned cached repo (tools are still in ${GRAB_DIR}/tools/)"
+    else
+        info "Nothing to clean"
+    fi
+}
+
+cmd_self_update() {
+    local source=""
+
+    # Check global config for grab's own repo
+    if [[ -f "$GRAB_GLOBAL_CONFIG" ]]; then
+        source=$(grep '^grab_repo=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
+    fi
+
+    # Fallback to env
+    [[ -z "$source" ]] && source="${GRAB_SELF_REPO:-}"
+
+    [[ -z "$source" ]] && die "No grab repo configured. Run: ${BOLD}grab setup${NC}"
+
+    info "Checking for updates from ${CYAN}${source}${NC}..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap "rm -rf '$tmp_dir'" EXIT
+
+    # Shallow clone (lightweight, it's a tiny repo)
+    git clone --depth 1 "$source" "$tmp_dir/grab" 2>/dev/null \
+        || die "Failed to clone from ${source}"
+
+    # Find the grab script at repo root
+    local new_grab=""
+    if [[ -f "$tmp_dir/grab/grab" ]]; then
+        new_grab="$tmp_dir/grab/grab"
+    elif [[ -f "$tmp_dir/grab/grab.sh" ]]; then
+        new_grab="$tmp_dir/grab/grab.sh"
+    fi
+
+    [[ -z "$new_grab" ]] && die "Could not find grab script at repo root"
+
+    # Compare versions
+    local new_version
+    new_version=$(grep '^GRAB_VERSION=' "$new_grab" | head -1 | cut -d'"' -f2)
+
+    if [[ "$new_version" == "$GRAB_VERSION" ]]; then
+        success "Already up to date (v${GRAB_VERSION})"
+        return
+    fi
+
+    info "v${GRAB_VERSION} → v${new_version}"
+
+    # Replace current script
+    if [[ ! -w "$GRAB_BIN" ]]; then
+        warn "No write access to ${GRAB_BIN}"
+        info "Trying with sudo..."
+        sudo cp "$new_grab" "$GRAB_BIN"
+        sudo chmod +x "$GRAB_BIN"
+    else
+        cp "$new_grab" "$GRAB_BIN"
+        chmod +x "$GRAB_BIN"
+    fi
+
+    success "Updated grab to ${BOLD}v${new_version}${NC}"
+}
+
+cmd_setup() {
+    local tools_url="${1:-}"
+    local grab_url="${2:-}"
+
+    mkdir -p "$(dirname "$GRAB_GLOBAL_CONFIG")"
+
+    if [[ -f "$GRAB_GLOBAL_CONFIG" ]]; then
+        echo -e "${BOLD}Current global config:${NC}"
+        cat "$GRAB_GLOBAL_CONFIG"
+        echo ""
+    fi
+
+    if [[ -n "$tools_url" ]]; then
+        # Non-interactive: grab setup <tools-repo> [grab-repo]
+        cat > "$GRAB_GLOBAL_CONFIG" <<EOF
+# grab global configuration
+repo=${tools_url}
+grab_repo=${grab_url:-}
+EOF
+        success "Global config saved to ${CYAN}${GRAB_GLOBAL_CONFIG}${NC}"
+        echo ""
+        echo -e "${DIM}# Config file:${NC}"
+        cat "$GRAB_GLOBAL_CONFIG"
+        return
+    fi
+
+    # Interactive setup
+    echo -e "${BOLD}grab setup${NC}\n"
+
+    local current_repo=""
+    [[ -f "$GRAB_GLOBAL_CONFIG" ]] && current_repo=$(grep '^repo=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
+
+    local prompt="Tools monorepo URL"
+    [[ -n "$current_repo" ]] && prompt="Tools monorepo URL [${current_repo}]"
+    read -rp "$(echo -e "${CYAN}${prompt}:${NC} ")" input_repo
+    input_repo="${input_repo:-$current_repo}"
+
+    local current_grab_repo=""
+    [[ -f "$GRAB_GLOBAL_CONFIG" ]] && current_grab_repo=$(grep '^grab_repo=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
+
+    local prompt2="Grab repo URL (for self-update)"
+    [[ -n "$current_grab_repo" ]] && prompt2="Grab repo URL [${current_grab_repo}]"
+    read -rp "$(echo -e "${CYAN}${prompt2}:${NC} ")" input_grab_repo
+    input_grab_repo="${input_grab_repo:-$current_grab_repo}"
+
+    # Write config
+    cat > "$GRAB_GLOBAL_CONFIG" <<EOF
+# grab global configuration
+repo=${input_repo}
+grab_repo=${input_grab_repo}
+EOF
+
+    success "Global config saved to ${CYAN}${GRAB_GLOBAL_CONFIG}${NC}"
+}
+
+cmd_help() {
+    cat <<EOF
+${BOLD}grab${NC} v${GRAB_VERSION} — Pull tools from a monorepo into any project
+
+${BOLD}USAGE${NC}
+  grab <command> [args]
+
+${BOLD}COMMANDS${NC}
+  ${CYAN}init${NC} <repo-url>          Initialize grab in current project
+  ${CYAN}add${NC} <tool> [@ref]         Add a tool (optionally pin to branch/tag)
+  ${CYAN}remove${NC} <tool>             Remove a tool from project
+  ${CYAN}update${NC} [tool]             Update one or all tools
+  ${CYAN}install${NC}                   Install all tools from .grabfile
+  ${CYAN}list${NC} [--remote]           List installed or available tools
+  ${CYAN}status${NC}                    Show grab status
+  ${CYAN}path${NC} <tool>               Print absolute path to a tool
+  ${CYAN}exec${NC} <tool> [args]        Run a tool's entrypoint script
+  ${CYAN}clean${NC}                     Remove cached repo (keeps tools)
+  ${CYAN}self-update${NC}               Update grab itself from repo
+  ${CYAN}setup${NC} [repo-url]          Configure global settings
+  ${CYAN}help${NC}                      Show this help
+
+${BOLD}EXAMPLES${NC}
+  grab init git@github.com:joffrey/tools.git
+  grab add stripe-cli
+  grab add docker-utils @v2.1
+  grab exec stripe-cli listen --forward-to localhost:3000
+  grab update
+  grab remove stripe-cli
+  grab self-update
+
+${BOLD}SELF-UPDATE${NC}
+  grab lives in its own repo, separate from your tools.
+  Configure with: ${CYAN}grab setup${NC}
+
+${BOLD}CONFIG${NC}
+  Repo URL is resolved in order:
+    1. ${CYAN}.grabfile${NC} (repo= line)
+    2. ${CYAN}\$GRAB_REPO${NC} env variable
+    3. ${CYAN}~/.config/grab/config${NC} (global, set with ${CYAN}grab setup${NC})
+
+${BOLD}FILES${NC}
+  ${CYAN}.grabfile${NC}              Manifest tracking repo & tools
+  ${CYAN}.grab/tools/${NC}           Where tools live in your project
+  ${CYAN}.grab/.repo/${NC}           Cached sparse checkout (removable)
+  ${CYAN}~/.config/grab/config${NC}  Global config (tools repo + grab repo)
+
+EOF
+}
+
+# ── Main ─────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        init)    cmd_init "$@" ;;
+        add)     cmd_add "$@" ;;
+        remove|rm) cmd_remove "$@" ;;
+        update)  cmd_update "$@" ;;
+        install|i) cmd_install "$@" ;;
+        list|ls) cmd_list "$@" ;;
+        status)  cmd_status "$@" ;;
+        path)    cmd_path "$@" ;;
+        exec|run) cmd_exec "$@" ;;
+        clean)   cmd_clean "$@" ;;
+        self-update|selfupdate) cmd_self_update "$@" ;;
+        setup)   cmd_setup "$@" ;;
+        help|-h|--help) cmd_help ;;
+        version|-v|--version) echo "grab v${GRAB_VERSION}" ;;
+        *)       die "Unknown command: ${cmd}. Run ${BOLD}grab help${NC}" ;;
+    esac
+}
+
+main "$@"
