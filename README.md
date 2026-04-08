@@ -168,6 +168,17 @@ grab setup <tools-repo> <grab-repo>
 
 Then `grab self-update` will fetch the latest version, compare `GRAB_VERSION`, and replace itself in place (using `sudo` if necessary).
 
+## Roadmap / Ideas
+
+Potential evolutions, not committed to:
+
+- `grab self-update --force` — skip the `GRAB_VERSION` comparison and always replace the local script. Useful during active development when pushing changes without bumping the version.
+- `grab self-update --ref <branch|tag|sha>` — pull a specific revision instead of the default branch tip.
+- `grab doctor` — sanity-check the local environment (git version, sparse-checkout support, repo reachability, `.grabfile` validity).
+- Lockfile (`.grabfile.lock`) pinning each tool to a resolved commit SHA for fully reproducible installs.
+- Post-install hooks per tool (e.g. `grab.hook` script run after `grab add`).
+- Shell completion (bash/zsh/fish) for tool names from the remote repo.
+
 ## License
 
 MIT

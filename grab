@@ -5,7 +5,7 @@ set -euo pipefail
 # grab — Pull individual tools from a monorepo into any project
 # ─────────────────────────────────────────────────────────────
 
-GRAB_VERSION="1.1.0"
+GRAB_VERSION="1.1.2"
 GRAB_DIR=".grab"
 GRAB_FILE=".grabfile"
 GRAB_REPO_DIR=".grab/.repo"
@@ -59,7 +59,7 @@ ensure_repo() {
         git clone --no-checkout --filter=blob:none "$repo_url" "$GRAB_REPO_DIR" 2>/dev/null
         cd "$GRAB_REPO_DIR"
         git sparse-checkout init --cone
-        git sparse-checkout set '!/*'  # start with nothing
+        # In cone mode, init alone leaves only top-level files checked out
         cd - > /dev/null
         success "Repo initialized"
     else
@@ -283,7 +283,9 @@ cmd_remove() {
         local remaining
         remaining=$(cd - > /dev/null && grabfile_list_tools | tr '\n' ' ')
         if [[ -z "$remaining" ]]; then
-            git sparse-checkout set '!/*' 2>/dev/null
+            # Reset to empty cone (top-level files only)
+            git sparse-checkout reapply 2>/dev/null
+            git sparse-checkout set 2>/dev/null || true
         else
             git sparse-checkout set $remaining 2>/dev/null
         fi
