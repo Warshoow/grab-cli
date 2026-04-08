@@ -56,11 +56,14 @@ ensure_repo() {
     if [[ ! -d "$GRAB_REPO_DIR/.git" ]]; then
         info "Cloning tools repo (sparse)..."
         mkdir -p "$GRAB_DIR"
-        git clone --no-checkout --filter=blob:none "$repo_url" "$GRAB_REPO_DIR" 2>/dev/null
-        cd "$GRAB_REPO_DIR"
-        git sparse-checkout init --cone
-        # In cone mode, init alone leaves only top-level files checked out
-        cd - > /dev/null
+        git clone --no-checkout --filter=blob:none "$repo_url" "$GRAB_REPO_DIR" \
+            || die "Failed to clone ${repo_url}"
+        (
+            cd "$GRAB_REPO_DIR"
+            git sparse-checkout init --cone
+            # Make sure origin/HEAD is set so we can detect the default branch
+            git remote set-head origin --auto >/dev/null 2>&1 || true
+        )
         success "Repo initialized"
     else
         # Ensure remote URL is up to date
@@ -75,7 +78,8 @@ ensure_repo() {
 }
 
 get_default_branch() {
-    # Priority: .grabfile branch > GRAB_BRANCH env > global config > "main"
+    # Priority: .grabfile branch > GRAB_BRANCH env > global config
+    #          > origin/HEAD of the cached repo > "main"
     if [[ -f "$GRAB_FILE" ]]; then
         local b
         b=$(grep '^branch=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
@@ -90,19 +94,29 @@ get_default_branch() {
         b=$(grep '^branch=' "$GRAB_GLOBAL_CONFIG" | head -1 | cut -d'=' -f2-)
         [[ -n "$b" ]] && echo "$b" && return
     fi
+    # Try to detect from the cached repo's origin/HEAD
+    if [[ -d "$GRAB_REPO_DIR/.git" ]]; then
+        local b
+        b=$(git -C "$GRAB_REPO_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
+        [[ -n "$b" ]] && echo "$b" && return
+    fi
     echo "main"
 }
 
 sync_repo() {
     # Resolve branch from the project dir BEFORE entering the repo dir,
-    # otherwise .grabfile lookup silently falls back to "main".
+    # otherwise .grabfile lookup silently falls back to default.
     local branch
     branch=$(get_default_branch)
     (
         cd "$GRAB_REPO_DIR"
-        git fetch origin "$branch" --quiet 2>/dev/null
-        git checkout "$branch" --quiet 2>/dev/null || true
-        git pull origin "$branch" --quiet 2>/dev/null
+        if ! git fetch origin "$branch" --quiet 2>/dev/null; then
+            die "Failed to fetch branch '${branch}' from origin. Set the right branch in .grabfile (branch=...) or via GRAB_BRANCH."
+        fi
+        git checkout "$branch" --quiet 2>/dev/null \
+            || git checkout -b "$branch" "origin/${branch}" --quiet 2>/dev/null \
+            || die "Failed to checkout branch '${branch}'"
+        git pull origin "$branch" --quiet 2>/dev/null || true
     )
 }
 
