@@ -82,6 +82,7 @@ Other contributors clone your project, run `grab install`, and get the same tool
 | `grab status` | Show grab status for the current project |
 | `grab path <tool>` | Print the absolute path to a tool (handy for scripts) |
 | `grab exec <tool> [args]` | Run a tool's entrypoint script |
+| `grab hook <tool>` | Run a tool's post-grab hook manually |
 | `grab clean` | Remove the cached repo (keeps installed tools) |
 | `grab self-update` | Update the `grab` script itself |
 | `grab setup [tools-repo] [grab-repo]` | Configure global defaults |
@@ -101,11 +102,48 @@ your-tools-repo/
 ├── docker-utils/
 │   ├── main.sh
 │   └── README.md
-└── deploy-helper/
-    └── deploy-helper.sh
+└── devcontainer/
+    ├── .devcontainer/
+    │   └── devcontainer.json
+    └── post-grab.sh     # hook: moves .devcontainer/ to the project root
 ```
 
 For `grab exec <tool>` to work, the tool must contain one of: `run.sh`, `main.sh`, `<tool>.sh`, or `entrypoint.sh`.
+
+## Post-grab hooks
+
+A tool can include a `post-grab.sh` script at its root. This hook runs after the tool is installed and can automate setup steps like moving files to the right place, symlinking configs, or printing instructions.
+
+**Example** — a `devcontainer` tool whose hook copies `.devcontainer/` to the project root:
+
+```bash
+#!/usr/bin/env bash
+# post-grab.sh for the devcontainer tool
+cp -r "${GRAB_TOOL_DIR}/.devcontainer" "${GRAB_PROJECT_DIR}/.devcontainer"
+echo "Installed .devcontainer to project root"
+```
+
+By default, `grab add` and `grab install` will **ask before running** a hook. You can override this:
+
+```bash
+grab add devcontainer --hook       # always run the hook
+grab add devcontainer --no-hook    # skip the hook
+grab install --hook                # run all hooks without asking
+```
+
+To run a hook manually at any time:
+
+```bash
+grab hook devcontainer
+```
+
+The following environment variables are available inside the hook:
+
+| Variable | Description |
+|---|---|
+| `GRAB_TOOL_NAME` | Name of the tool (e.g., `devcontainer`) |
+| `GRAB_TOOL_DIR` | Absolute path to the installed tool directory |
+| `GRAB_PROJECT_DIR` | Absolute path to the project root |
 
 ## The `.grabfile`
 

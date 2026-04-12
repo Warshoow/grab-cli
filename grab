@@ -214,6 +214,39 @@ gitignore_remove() {
     fi
 }
 
+# ── Hooks ───────────────────────────────────────────────────
+GRAB_HOOK_FILE="post-grab.sh"
+
+run_hook() {
+    local tool="$1"
+    local auto="${2:-ask}"  # "ask", "yes", or "no"
+    local tool_path="${GRAB_DIR}/tools/${tool}"
+    local hook="${tool_path}/${GRAB_HOOK_FILE}"
+
+    [[ ! -f "$hook" ]] && return 0
+
+    if [[ "$auto" == "no" ]]; then
+        info "${tool} has a post-grab hook (skipped)"
+        return 0
+    fi
+
+    if [[ "$auto" == "ask" ]]; then
+        echo -e "${YELLOW}▸${NC} ${BOLD}${tool}${NC} has a post-grab hook: ${DIM}${GRAB_HOOK_FILE}${NC}"
+        read -rp "  Run it? [y/N] " confirm
+        [[ "$confirm" != [yY] ]] && return 0
+    fi
+
+    info "Running post-grab hook for ${BOLD}${tool}${NC}..."
+    chmod +x "$hook"
+    (
+        export GRAB_TOOL_NAME="$tool"
+        export GRAB_TOOL_DIR="$(cd "$tool_path" && pwd)"
+        export GRAB_PROJECT_DIR="$(pwd)"
+        "$hook"
+    ) || { error "Hook failed for ${tool}"; return 1; }
+    success "Hook completed for ${BOLD}${tool}${NC}"
+}
+
 # ── Commands ─────────────────────────────────────────────────
 
 cmd_init() {
@@ -233,9 +266,23 @@ cmd_init() {
 }
 
 cmd_add() {
-    local tool="${1:-}"
-    local ref="${2:-}"
-    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab add <tool> [@branch/tag]${NC}"
+    local hook_mode="ask"
+    local tool="" ref=""
+
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-hook)  hook_mode="no"; shift ;;
+            --hook)     hook_mode="yes"; shift ;;
+            *)
+                if [[ -z "$tool" ]]; then tool="$1"
+                elif [[ -z "$ref" ]]; then ref="$1"
+                fi
+                shift ;;
+        esac
+    done
+
+    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab add <tool> [@branch/tag] [--no-hook|--hook]${NC}"
 
     # Strip leading @ if user passed it
     ref="${ref#@}"
@@ -282,6 +329,9 @@ cmd_add() {
     local ref_info=""
     [[ -n "$ref" ]] && ref_info=" ${DIM}@${ref}${NC}"
     success "Added ${BOLD}${tool}${NC}${ref_info} → ${GRAB_DIR}/tools/${tool}"
+
+    # Run post-grab hook if present
+    run_hook "$tool" "$hook_mode"
 }
 
 cmd_remove() {
@@ -360,6 +410,15 @@ cmd_update() {
 }
 
 cmd_install() {
+    local hook_mode="ask"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-hook)  hook_mode="no"; shift ;;
+            --hook)     hook_mode="yes"; shift ;;
+            *)          shift ;;
+        esac
+    done
+
     # Install all tools from .grabfile (like npm install)
     if [[ ! -f "$GRAB_FILE" ]]; then
         die "No .grabfile found. Run: ${BOLD}grab init <repo-url>${NC}"
@@ -401,6 +460,12 @@ cmd_install() {
 
     gitignore_ensure "$GRAB_DIR/"
     success "Installed ${BOLD}${count}${NC} tool(s)"
+
+    # Run post-grab hooks
+    while IFS= read -r tool; do
+        [[ -z "$tool" ]] && continue
+        run_hook "$tool" "$hook_mode"
+    done <<< "$(grabfile_list_tools)"
 }
 
 cmd_list() {
@@ -520,6 +585,23 @@ cmd_exec() {
 
     chmod +x "$entrypoint"
     exec "$entrypoint" "$@"
+}
+
+cmd_hook() {
+    local tool="${1:-}"
+    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab hook <tool>${NC}"
+
+    local tool_path="${GRAB_DIR}/tools/${tool}"
+    if [[ ! -d "$tool_path" ]]; then
+        die "Tool '${tool}' is not installed"
+    fi
+
+    local hook="${tool_path}/${GRAB_HOOK_FILE}"
+    if [[ ! -f "$hook" ]]; then
+        die "No ${GRAB_HOOK_FILE} found in ${tool}"
+    fi
+
+    run_hook "$tool" "yes"
 }
 
 cmd_clean() {
@@ -661,6 +743,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}status${NC}                    Show grab status
   ${CYAN}path${NC} <tool>               Print absolute path to a tool
   ${CYAN}exec${NC} <tool> [args]        Run a tool's entrypoint script
+  ${CYAN}hook${NC} <tool>               Run a tool's post-grab hook manually
   ${CYAN}clean${NC}                     Remove cached repo (keeps tools)
   ${CYAN}self-update${NC}               Update grab itself from repo
   ${CYAN}setup${NC} [repo-url]          Configure global settings
@@ -674,6 +757,18 @@ ${BOLD}EXAMPLES${NC}
   grab update
   grab remove stripe-cli
   grab self-update
+
+${BOLD}HOOKS${NC}
+  Tools can include a ${CYAN}post-grab.sh${NC} script that runs after install.
+  By default, grab asks before running. Override with:
+    ${CYAN}--hook${NC}       Always run hooks without asking
+    ${CYAN}--no-hook${NC}    Skip all hooks
+  Run a hook manually anytime: ${CYAN}grab hook <tool>${NC}
+
+  Available env vars inside the hook:
+    ${CYAN}GRAB_TOOL_NAME${NC}     Name of the tool
+    ${CYAN}GRAB_TOOL_DIR${NC}      Absolute path to the tool directory
+    ${CYAN}GRAB_PROJECT_DIR${NC}   Absolute path to the project root
 
 ${BOLD}SELF-UPDATE${NC}
   grab lives in its own repo, separate from your tools.
@@ -714,6 +809,7 @@ main() {
         status)  cmd_status "$@" ;;
         path)    cmd_path "$@" ;;
         exec|run) cmd_exec "$@" ;;
+        hook)    cmd_hook "$@" ;;
         clean)   cmd_clean "$@" ;;
         self-update|selfupdate) cmd_self_update "$@" ;;
         setup)   cmd_setup "$@" ;;
