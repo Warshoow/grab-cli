@@ -5,7 +5,7 @@ set -euo pipefail
 # grab — Pull individual tools from a monorepo into any project
 # ─────────────────────────────────────────────────────────────
 
-GRAB_VERSION="1.1.6"
+GRAB_VERSION="1.1.7"
 GRAB_DIR=".grab"
 GRAB_FILE=".grabfile"
 GRAB_REPO_DIR=".grab/.repo"
