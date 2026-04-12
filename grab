@@ -5,7 +5,7 @@ set -euo pipefail
 # grab — Pull individual tools from a monorepo into any project
 # ─────────────────────────────────────────────────────────────
 
-GRAB_VERSION="1.1.4"
+GRAB_VERSION="1.1.6"
 GRAB_DIR=".grab"
 GRAB_FILE=".grabfile"
 GRAB_REPO_DIR=".grab/.repo"
@@ -727,8 +727,7 @@ EOF
 }
 
 cmd_help() {
-    cat <<EOF
-${BOLD}grab${NC} v${GRAB_VERSION} — Pull tools from a monorepo into any project
+    echo -e "${BOLD}grab${NC} v${GRAB_VERSION} — Pull tools from a monorepo into any project
 
 ${BOLD}USAGE${NC}
   grab <command> [args]
@@ -790,8 +789,7 @@ ${BOLD}FILES${NC}
   ${CYAN}.grab/tools/${NC}           Where tools live in your project
   ${CYAN}.grab/.repo/${NC}           Cached sparse checkout (removable)
   ${CYAN}~/.config/grab/config${NC}  Global config (tools repo + grab repo)
-
-EOF
+"
 }
 
 # ── Main ─────────────────────────────────────────────────────
