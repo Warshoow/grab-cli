@@ -389,6 +389,17 @@ cmd_update() {
             sync_repo
         fi
 
+        # Ensure the tool is in sparse-checkout and files are up to date
+        (
+            cd "$GRAB_REPO_DIR"
+            git sparse-checkout add "$tool" 2>/dev/null
+            git read-tree -mu HEAD 2>/dev/null || true
+        )
+
+        if [[ ! -d "${GRAB_REPO_DIR}/${tool}" ]]; then
+            die "Tool '${tool}' not found in repo after update"
+        fi
+
         rm -rf "${GRAB_DIR}/tools/${tool}"
         cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
         success "Updated ${BOLD}${tool}${NC}"
@@ -399,14 +410,97 @@ cmd_update() {
         local count=0
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
+            (
+                cd "$GRAB_REPO_DIR"
+                git sparse-checkout add "$t" 2>/dev/null
+            )
             rm -rf "${GRAB_DIR}/tools/${t}"
             cp -r "${GRAB_REPO_DIR}/${t}" "${GRAB_DIR}/tools/${t}"
             info "Updated ${t}"
             ((count++))
         done <<< "$(grabfile_list_tools)"
 
+        ( cd "$GRAB_REPO_DIR" && git read-tree -mu HEAD 2>/dev/null || true )
+
         success "Updated ${BOLD}${count}${NC} tool(s)"
     fi
+}
+
+cmd_push() {
+    local tool="${1:-}"
+    local message="${2:-}"
+    [[ -z "$tool" ]] && die "Usage: ${BOLD}grab push <tool> [\"commit message\"]${NC}"
+
+    if [[ ! -d "${GRAB_DIR}/tools/${tool}" ]]; then
+        die "Tool '${tool}' is not installed"
+    fi
+
+    ensure_repo
+
+    # Sync repo to latest before pushing
+    local ref
+    ref=$(grabfile_get_ref "$tool")
+    if [[ -n "$ref" ]]; then
+        (
+            cd "$GRAB_REPO_DIR"
+            git fetch origin "$ref" --quiet 2>/dev/null
+            git checkout "$ref" --quiet 2>/dev/null
+            git pull origin "$ref" --quiet 2>/dev/null
+        )
+    else
+        sync_repo
+    fi
+
+    # Ensure tool is in sparse-checkout
+    (
+        cd "$GRAB_REPO_DIR"
+        git sparse-checkout add "$tool" 2>/dev/null
+        git read-tree -mu HEAD 2>/dev/null || true
+    )
+
+    # Copy local changes into the repo cache
+    rm -rf "${GRAB_REPO_DIR}/${tool}"
+    cp -r "${GRAB_DIR}/tools/${tool}" "${GRAB_REPO_DIR}/${tool}"
+
+    # Check if there are actual changes
+    local has_changes
+    has_changes=$(cd "$GRAB_REPO_DIR" && git status --porcelain "$tool" 2>/dev/null)
+    if [[ -z "$has_changes" ]]; then
+        info "No changes to push for ${BOLD}${tool}${NC}"
+        return
+    fi
+
+    # Show what changed
+    echo -e "${BOLD}Changes to push:${NC}"
+    ( cd "$GRAB_REPO_DIR" && git diff --stat "$tool" )
+    echo ""
+
+    # Ask for commit message if not provided
+    if [[ -z "$message" ]]; then
+        read -rp "$(echo -e "${CYAN}Commit message:${NC} ")" message
+        [[ -z "$message" ]] && message="update ${tool}"
+    fi
+
+    # Resolve git identity from project, global config, or fallback
+    local git_name git_email
+    git_name=$(git config user.name 2>/dev/null || echo "")
+    git_email=$(git config user.email 2>/dev/null || echo "")
+
+    if [[ -z "$git_name" || -z "$git_email" ]]; then
+        die "Git identity not configured. Run:\n  git config --global user.name \"Your Name\"\n  git config --global user.email \"you@example.com\""
+    fi
+
+    # Commit and push
+    cd "$GRAB_REPO_DIR"
+    git add "$tool" || { cd - > /dev/null; die "Failed to stage changes"; }
+    git -c user.name="$git_name" -c user.email="$git_email" \
+        commit -m "$message" --quiet \
+        || { cd - > /dev/null; die "Failed to commit changes"; }
+    git push origin HEAD --quiet \
+        || { cd - > /dev/null; die "Failed to push to remote"; }
+    cd - > /dev/null
+
+    success "Pushed ${BOLD}${tool}${NC} to remote"
 }
 
 cmd_install() {
@@ -736,7 +830,8 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}init${NC} <repo-url>          Initialize grab in current project
   ${CYAN}add${NC} <tool> [@ref]         Add a tool (optionally pin to branch/tag)
   ${CYAN}remove${NC} <tool>             Remove a tool from project
-  ${CYAN}update${NC} [tool]             Update one or all tools
+  ${CYAN}update${NC} [tool]             Update one or all tools (pull from repo)
+  ${CYAN}push${NC} <tool> [\"msg\"]       Push local changes to the repo
   ${CYAN}install${NC}                   Install all tools from .grabfile
   ${CYAN}list${NC} [--remote]           List installed or available tools
   ${CYAN}status${NC}                    Show grab status
@@ -754,6 +849,7 @@ ${BOLD}EXAMPLES${NC}
   grab add docker-utils @v2.1
   grab exec stripe-cli listen --forward-to localhost:3000
   grab update
+  grab push devcontainer "add post-grab hook"
   grab remove stripe-cli
   grab self-update
 
@@ -802,6 +898,7 @@ main() {
         add)     cmd_add "$@" ;;
         remove|rm) cmd_remove "$@" ;;
         update)  cmd_update "$@" ;;
+        push)    cmd_push "$@" ;;
         install|i) cmd_install "$@" ;;
         list|ls) cmd_list "$@" ;;
         status)  cmd_status "$@" ;;

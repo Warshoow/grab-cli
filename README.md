@@ -76,7 +76,8 @@ Other contributors clone your project, run `grab install`, and get the same tool
 | `grab init <repo-url>` | Initialize grab in the current project |
 | `grab add <tool> [@ref]` | Add a tool, optionally pinned to a branch or tag |
 | `grab remove <tool>` | Remove a tool from the project |
-| `grab update [tool]` | Update one tool (or all of them) |
+| `grab update [tool]` | Pull updates from the repo (one or all tools) |
+| `grab push <tool> ["msg"]` | Push local changes back to the repo |
 | `grab install` | Install every tool listed in `.grabfile` |
 | `grab list [--remote]` | List installed tools (or available ones in the repo) |
 | `grab status` | Show grab status for the current project |
