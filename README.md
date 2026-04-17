@@ -217,6 +217,7 @@ Potential evolutions, not committed to:
 - Lockfile (`.grabfile.lock`) pinning each tool to a resolved commit SHA for fully reproducible installs.
 - Post-install hooks per tool (e.g. `grab.hook` script run after `grab add`).
 - Shell completion (bash/zsh/fish) for tool names from the remote repo.
+- Avoid duplicating tool data between `.grab/.repo/<tool>/` (sparse-checkout cache) and `.grab/tools/<tool>/` (working copy) — current behavior is `cp -r`. Could use hard links (`cp -al` on Linux, `mklink /H` on Windows NTFS) for zero disk overhead, or an opt-in `grab add --linked` that symlinks directly into the cache (faster updates, but exposes `.git` and breaks on `grab clean`).
 
 ## License
 
