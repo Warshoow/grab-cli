@@ -207,6 +207,10 @@ grab setup <tools-repo> <grab-repo>
 
 Then `grab self-update` will fetch the latest version, compare `GRAB_VERSION`, and replace itself in place (using `sudo` if necessary).
 
+## Troubleshooting
+
+- **Running grab inside a VSCode devcontainer and seeing `error: could not write config file /root/.gitconfig: Resource busy`?** See [docs/devcontainer.md](docs/devcontainer.md) — it's a bind-mount problem, not a grab bug, and there's a one-liner fix.
+
 ## Roadmap / Ideas
 
 Potential evolutions, not committed to:
