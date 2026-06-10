@@ -5,7 +5,7 @@ set -euo pipefail
 # grab — Pull individual tools from a monorepo into any project
 # ─────────────────────────────────────────────────────────────
 
-GRAB_VERSION="1.1.7"
+GRAB_VERSION="1.2.0"
 GRAB_DIR=".grab"
 GRAB_FILE=".grabfile"
 GRAB_REPO_DIR=".grab/.repo"
@@ -503,6 +503,99 @@ cmd_push() {
     success "Pushed ${BOLD}${tool}${NC} to remote"
 }
 
+cmd_publish() {
+    local src="" name="" message="" force="no"
+
+    # Parse args & flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m|--message) message="${2:-}"; shift 2 ;;
+            --force)      force="yes"; shift ;;
+            *)
+                if [[ -z "$src" ]]; then src="$1"
+                elif [[ -z "$name" ]]; then name="$1"
+                fi
+                shift ;;
+        esac
+    done
+
+    [[ -z "$src" ]] && die "Usage: ${BOLD}grab publish <path> [name] [-m \"msg\"] [--force]${NC}"
+    [[ ! -d "$src" ]] && die "Source '${src}' is not a directory"
+
+    # Resolve an absolute source path before we change directories.
+    src="$(cd "$src" && pwd)"
+
+    # Default tool name = source folder basename.
+    [[ -z "$name" ]] && name="$(basename "$src")"
+
+    # Tool name must be a single top-level directory in the repo.
+    if [[ "$name" == */* || "$name" == "." || "$name" == ".." ]]; then
+        die "Invalid tool name '${name}'. Use a simple name with no slashes."
+    fi
+
+    ensure_repo
+    sync_repo
+
+    # Does the tool already exist in the repo?
+    local exists="no"
+    if ( cd "$GRAB_REPO_DIR" && git ls-tree -d HEAD "$name" &>/dev/null ); then
+        exists="yes"
+        if [[ "$force" != "yes" ]]; then
+            warn "Tool '${name}' already exists in the repo."
+            read -rp "  Overwrite it? [y/N] " confirm
+            [[ "$confirm" != [yY] ]] && { info "Aborted"; return; }
+        fi
+    fi
+
+    # Make sure the tool path is materialized in the sparse checkout.
+    ( cd "$GRAB_REPO_DIR" && git sparse-checkout add "$name" 2>/dev/null )
+
+    # Copy the dev folder into the repo cache (dropping any nested .git).
+    rm -rf "${GRAB_REPO_DIR:?}/${name}"
+    cp -r "$src" "${GRAB_REPO_DIR}/${name}"
+    rm -rf "${GRAB_REPO_DIR}/${name}/.git"
+
+    # Bail out if nothing actually changed.
+    local has_changes
+    has_changes=$(cd "$GRAB_REPO_DIR" && git status --porcelain "$name" 2>/dev/null)
+    if [[ -z "$has_changes" ]]; then
+        info "No changes to publish for ${BOLD}${name}${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Changes to publish:${NC}"
+    ( cd "$GRAB_REPO_DIR" && git diff --stat HEAD "$name" 2>/dev/null || git diff --stat "$name" )
+    echo ""
+
+    if [[ -z "$message" ]]; then
+        local default_msg="add ${name}"
+        [[ "$exists" == "yes" ]] && default_msg="update ${name}"
+        read -rp "$(echo -e "${CYAN}Commit message:${NC} ")" message
+        [[ -z "$message" ]] && message="$default_msg"
+    fi
+
+    # Resolve git identity from project, global config, or fallback.
+    local git_name git_email
+    git_name=$(git config user.name 2>/dev/null || echo "")
+    git_email=$(git config user.email 2>/dev/null || echo "")
+
+    if [[ -z "$git_name" || -z "$git_email" ]]; then
+        die "Git identity not configured. Run:\n  git config --global user.name \"Your Name\"\n  git config --global user.email \"you@example.com\""
+    fi
+
+    cd "$GRAB_REPO_DIR"
+    git add "$name" || { cd - > /dev/null; die "Failed to stage changes"; }
+    git -c user.name="$git_name" -c user.email="$git_email" \
+        commit -m "$message" --quiet \
+        || { cd - > /dev/null; die "Failed to commit changes"; }
+    git push origin HEAD --quiet \
+        || { cd - > /dev/null; die "Failed to push to remote"; }
+    cd - > /dev/null
+
+    success "Published ${BOLD}${name}${NC} to remote"
+    info "Install it anywhere with: ${BOLD}grab add ${name}${NC}"
+}
+
 cmd_install() {
     local hook_mode="ask"
     while [[ $# -gt 0 ]]; do
@@ -832,6 +925,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}remove${NC} <tool>             Remove a tool from project
   ${CYAN}update${NC} [tool]             Update one or all tools (pull from repo)
   ${CYAN}push${NC} <tool> [\"msg\"]       Push local changes to the repo
+  ${CYAN}publish${NC} <path> [name]      Publish a dev folder as a new tool
   ${CYAN}install${NC}                   Install all tools from .grabfile
   ${CYAN}list${NC} [--remote]           List installed or available tools
   ${CYAN}status${NC}                    Show grab status
@@ -850,6 +944,8 @@ ${BOLD}EXAMPLES${NC}
   grab exec stripe-cli listen --forward-to localhost:3000
   grab update
   grab push devcontainer "add post-grab hook"
+  grab publish ~/dev/my-new-tool
+  grab publish ./build-scripts deploy-utils -m "initial version"
   grab remove stripe-cli
   grab self-update
 
@@ -899,6 +995,7 @@ main() {
         remove|rm) cmd_remove "$@" ;;
         update)  cmd_update "$@" ;;
         push)    cmd_push "$@" ;;
+        publish) cmd_publish "$@" ;;
         install|i) cmd_install "$@" ;;
         list|ls) cmd_list "$@" ;;
         status)  cmd_status "$@" ;;
