@@ -78,6 +78,7 @@ Other contributors clone your project, run `grab install`, and get the same tool
 | `grab remove <tool>` | Remove a tool from the project |
 | `grab update [tool]` | Pull updates from the repo (one or all tools) |
 | `grab push <tool> ["msg"]` | Push local changes back to the repo |
+| `grab publish <path> [name] [-m "msg"] [--force]` | Publish a standalone dev folder (e.g. `.`) as a new tool in the monorepo |
 | `grab install` | Install every tool listed in `.grabfile` |
 | `grab list [--remote]` | List installed tools (or available ones in the repo) |
 | `grab status` | Show grab status for the current project |
@@ -110,6 +111,37 @@ your-tools-repo/
 ```
 
 For `grab exec <tool>` to work, the tool must contain one of: `run.sh`, `main.sh`, `<tool>.sh`, or `entrypoint.sh`.
+
+## Publishing a new tool
+
+When you've built a tool in its own standalone folder and want to share it through the monorepo, use `grab publish` instead of copy-pasting it into the repo by hand:
+
+```bash
+# Publish a folder — tool name defaults to the folder's basename
+grab publish ~/dev/my-new-tool
+
+# Or run it straight from inside the tool's own folder
+cd ~/dev/my-new-tool && grab publish .
+
+# Override the tool name and pass a commit message
+grab publish ./build-scripts deploy-utils -m "initial version"
+
+# Overwrite an existing tool without the confirmation prompt
+grab publish ~/dev/foo --force
+```
+
+`grab publish` does not need a `.grabfile`; it resolves the monorepo from `$GRAB_REPO` or your global config (`grab setup`), so it works from any standalone folder.
+
+What it does:
+
+1. Clones the monorepo into a **throwaway temp directory** (not the project's `.grab/.repo/` cache), so `grab publish .` never copies the cache into itself and a clean dev folder stays clean — no `.grab/` left behind
+2. Copies your folder in under `<name>/`, **dropping any nested `.git` or `.grab`** so you never embed a sub-repo or the cache
+3. Shows a `git diff --stat`, asks for a commit message (unless `-m` is given), then commits and pushes to the repo's default branch
+4. If the tool already exists, it asks before overwriting (skip with `--force`)
+
+It does **not** install the tool into the current project — once published, pull it anywhere with `grab add <name>`.
+
+The tool name must be a single top-level directory (no slashes), matching the [monorepo layout](#layout-of-a-tools-monorepo) above.
 
 ## Post-grab hooks
 
