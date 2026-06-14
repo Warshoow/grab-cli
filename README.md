@@ -78,7 +78,7 @@ Other contributors clone your project, run `grab install`, and get the same tool
 | `grab remove <tool>` | Remove a tool from the project |
 | `grab update [tool]` | Pull updates from the repo (one or all tools) |
 | `grab push <tool> ["msg"]` | Push local changes back to the repo |
-| `grab publish <path> [name] [-m "msg"] [--force]` | Publish a standalone dev folder as a new tool in the monorepo |
+| `grab publish <path> [name] [-m "msg"] [--force]` | Publish a standalone dev folder (e.g. `.`) as a new tool in the monorepo |
 | `grab install` | Install every tool listed in `.grabfile` |
 | `grab list [--remote]` | List installed tools (or available ones in the repo) |
 | `grab status` | Show grab status for the current project |
@@ -120,6 +120,9 @@ When you've built a tool in its own standalone folder and want to share it throu
 # Publish a folder — tool name defaults to the folder's basename
 grab publish ~/dev/my-new-tool
 
+# Or run it straight from inside the tool's own folder
+cd ~/dev/my-new-tool && grab publish .
+
 # Override the tool name and pass a commit message
 grab publish ./build-scripts deploy-utils -m "initial version"
 
@@ -127,11 +130,13 @@ grab publish ./build-scripts deploy-utils -m "initial version"
 grab publish ~/dev/foo --force
 ```
 
+`grab publish` does not need a `.grabfile`; it resolves the monorepo from `$GRAB_REPO` or your global config (`grab setup`), so it works from any standalone folder.
+
 What it does:
 
-1. Syncs the monorepo into `.grab/.repo/` (same cache as everything else)
-2. Copies your folder in under `<name>/`, **dropping any nested `.git`** so you never embed a sub-repo
-3. Shows a `git diff --stat`, asks for a commit message (unless `-m` is given), then commits and pushes
+1. Clones the monorepo into a **throwaway temp directory** (not the project's `.grab/.repo/` cache), so `grab publish .` never copies the cache into itself and a clean dev folder stays clean — no `.grab/` left behind
+2. Copies your folder in under `<name>/`, **dropping any nested `.git` or `.grab`** so you never embed a sub-repo or the cache
+3. Shows a `git diff --stat`, asks for a commit message (unless `-m` is given), then commits and pushes to the repo's default branch
 4. If the tool already exists, it asks before overwriting (skip with `--force`)
 
 It does **not** install the tool into the current project — once published, pull it anywhere with `grab add <name>`.

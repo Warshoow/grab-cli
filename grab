@@ -523,6 +523,7 @@ cmd_publish() {
     [[ ! -d "$src" ]] && die "Source '${src}' is not a directory"
 
     # Resolve an absolute source path before we change directories.
+    # This lets you run `grab publish .` from inside the tool's own folder.
     src="$(cd "$src" && pwd)"
 
     # Default tool name = source folder basename.
@@ -533,38 +534,84 @@ cmd_publish() {
         die "Invalid tool name '${name}'. Use a simple name with no slashes."
     fi
 
-    ensure_repo
-    sync_repo
-
-    # Does the tool already exist in the repo?
-    local exists="no"
-    if ( cd "$GRAB_REPO_DIR" && git ls-tree -d HEAD "$name" &>/dev/null ); then
-        exists="yes"
-        if [[ "$force" != "yes" ]]; then
-            warn "Tool '${name}' already exists in the repo."
-            read -rp "  Overwrite it? [y/N] " confirm
-            [[ "$confirm" != [yY] ]] && { info "Aborted"; return; }
-        fi
+    # Resolve git identity up front (before any clone work).
+    local git_name git_email
+    git_name=$(git config user.name 2>/dev/null || echo "")
+    git_email=$(git config user.email 2>/dev/null || echo "")
+    if [[ -z "$git_name" || -z "$git_email" ]]; then
+        die "Git identity not configured. Run:\n  git config --global user.name \"Your Name\"\n  git config --global user.email \"you@example.com\""
     fi
 
-    # Make sure the tool path is materialized in the sparse checkout.
-    ( cd "$GRAB_REPO_DIR" && git sparse-checkout add "$name" 2>/dev/null )
+    local repo_url
+    repo_url=$(get_repo_url)
 
-    # Copy the dev folder into the repo cache (dropping any nested .git).
-    rm -rf "${GRAB_REPO_DIR:?}/${name}"
-    cp -r "$src" "${GRAB_REPO_DIR}/${name}"
-    rm -rf "${GRAB_REPO_DIR}/${name}/.git"
+    # Publish uses its OWN throwaway clone instead of the project's
+    # .grab/.repo cache. That way `grab publish .` never copies the cache
+    # into itself, and a clean dev folder stays clean (no .grab/ left behind).
+    local tmp_repo
+    tmp_repo=$(mktemp -d)
+    trap "rm -rf '$tmp_repo'" EXIT
 
-    # Bail out if nothing actually changed.
+    info "Cloning tools repo (sparse)..."
+    git clone --no-checkout --filter=blob:none "$repo_url" "$tmp_repo" 2>/dev/null \
+        || die "Failed to clone ${repo_url}"
+
+    # Resolve the target branch: explicit config wins, else the repo's
+    # actual default branch (origin/HEAD), else "main".
+    local branch
+    branch=$(get_default_branch)
+    (
+        cd "$tmp_repo"
+        git sparse-checkout init --cone >/dev/null 2>&1
+        git remote set-head origin --auto >/dev/null 2>&1 || true
+        if [[ ! -f "$GRAB_FILE" && -z "${GRAB_BRANCH:-}" ]] \
+           && ! grep -q '^branch=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null; then
+            # No branch configured anywhere: trust the repo's default.
+            local detected
+            detected=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
+            [[ -n "$detected" ]] && branch="$detected"
+        fi
+        git fetch origin "$branch" --quiet 2>/dev/null \
+            || die "Failed to fetch branch '${branch}' from ${repo_url}"
+        git checkout "$branch" --quiet 2>/dev/null \
+            || git checkout -b "$branch" "origin/${branch}" --quiet 2>/dev/null \
+            || die "Failed to checkout branch '${branch}'"
+        git sparse-checkout add "$name" >/dev/null 2>&1
+    )
+
+    # Does the tool already exist on the branch?
+    # (git ls-tree returns 0 even for a missing path — check for output.)
+    local exists="no"
+    if [[ -n "$(cd "$tmp_repo" && git ls-tree -d HEAD "$name" 2>/dev/null)" ]]; then
+        exists="yes"
+    fi
+
+    # Copy the dev folder in, dropping any nested .git or .grab so we never
+    # embed a sub-repo or grab's own cache. dest lives outside src, so even
+    # `grab publish .` can't recurse into itself.
+    local dest="${tmp_repo}/${name}"
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    cp -r "$src/." "$dest/"
+    rm -rf "${dest}/.git" "${dest}/.grab"
+
+    # Bail out if nothing actually changed (before bothering to prompt).
     local has_changes
-    has_changes=$(cd "$GRAB_REPO_DIR" && git status --porcelain "$name" 2>/dev/null)
+    has_changes=$(cd "$tmp_repo" && git status --porcelain "$name" 2>/dev/null)
     if [[ -z "$has_changes" ]]; then
         info "No changes to publish for ${BOLD}${name}${NC}"
         return
     fi
 
+    # Confirm before clobbering an existing tool.
+    if [[ "$exists" == "yes" && "$force" != "yes" ]]; then
+        warn "Tool '${name}' already exists in the repo and will be overwritten."
+        read -rp "  Continue? [y/N] " confirm
+        [[ "$confirm" != [yY] ]] && { info "Aborted"; return; }
+    fi
+
     echo -e "${BOLD}Changes to publish:${NC}"
-    ( cd "$GRAB_REPO_DIR" && git diff --stat HEAD "$name" 2>/dev/null || git diff --stat "$name" )
+    ( cd "$tmp_repo" && git add "$name" 2>/dev/null && git diff --cached --stat "$name" )
     echo ""
 
     if [[ -z "$message" ]]; then
@@ -574,23 +621,13 @@ cmd_publish() {
         [[ -z "$message" ]] && message="$default_msg"
     fi
 
-    # Resolve git identity from project, global config, or fallback.
-    local git_name git_email
-    git_name=$(git config user.name 2>/dev/null || echo "")
-    git_email=$(git config user.email 2>/dev/null || echo "")
-
-    if [[ -z "$git_name" || -z "$git_email" ]]; then
-        die "Git identity not configured. Run:\n  git config --global user.name \"Your Name\"\n  git config --global user.email \"you@example.com\""
-    fi
-
-    cd "$GRAB_REPO_DIR"
-    git add "$name" || { cd - > /dev/null; die "Failed to stage changes"; }
-    git -c user.name="$git_name" -c user.email="$git_email" \
-        commit -m "$message" --quiet \
-        || { cd - > /dev/null; die "Failed to commit changes"; }
-    git push origin HEAD --quiet \
-        || { cd - > /dev/null; die "Failed to push to remote"; }
-    cd - > /dev/null
+    (
+        cd "$tmp_repo"
+        git add "$name" || die "Failed to stage changes"
+        git -c user.name="$git_name" -c user.email="$git_email" \
+            commit -m "$message" --quiet || die "Failed to commit changes"
+        git push origin HEAD --quiet || die "Failed to push to remote"
+    )
 
     success "Published ${BOLD}${name}${NC} to remote"
     info "Install it anywhere with: ${BOLD}grab add ${name}${NC}"
@@ -945,6 +982,7 @@ ${BOLD}EXAMPLES${NC}
   grab update
   grab push devcontainer "add post-grab hook"
   grab publish ~/dev/my-new-tool
+  cd ~/dev/my-new-tool && grab publish .
   grab publish ./build-scripts deploy-utils -m "initial version"
   grab remove stripe-cli
   grab self-update
