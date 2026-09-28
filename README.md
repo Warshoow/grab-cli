@@ -1,4 +1,4 @@
-# grab
+# grab-cli
 
 > Pull individual tools from a monorepo into any project.
 
@@ -16,6 +16,8 @@ You probably have a folder of useful scripts you copy from project to project. O
 - Sparse checkout (`--filter=blob:none`) — only the tools you ask for are downloaded
 - Per-project manifest (`.grabfile`) so anyone cloning your project can run `grab install` and get the same tools
 - Optional pinning to a branch or tag per tool
+
+gitdiagram : https://gitdiagram.com/warshoow/grab-cli
 
 ## Installation
 
