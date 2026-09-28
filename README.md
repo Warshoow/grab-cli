@@ -1,5 +1,7 @@
 # grab-cli
 
+[![Watch a one-minute video tour of grab-cli](https://gitdiagram.com/video-badge.svg)](https://gitdiagram.com/warshoow/grab-cli/video)
+
 > Pull individual tools from a monorepo into any project.
 
 `grab` is a small Bash script that lets you maintain a single monorepo of shared tools (CLIs, scripts, dev utilities, Docker helpers...) and cherry-pick them into any project on demand — without cloning the whole repo, without Git submodules, without copy-paste.
@@ -16,8 +18,6 @@ You probably have a folder of useful scripts you copy from project to project. O
 - Sparse checkout (`--filter=blob:none`) — only the tools you ask for are downloaded
 - Per-project manifest (`.grabfile`) so anyone cloning your project can run `grab install` and get the same tools
 - Optional pinning to a branch or tag per tool
-
-gitdiagram : https://gitdiagram.com/warshoow/grab-cli
 
 ## Installation
 
