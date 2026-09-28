@@ -22,15 +22,15 @@ You probably have a folder of useful scripts you copy from project to project. O
 Drop the script somewhere in your `$PATH` and make it executable:
 
 ```bash
-curl -o ~/.local/bin/grab https://raw.githubusercontent.com/Warshoow/grab/main/grab
+curl -o ~/.local/bin/grab https://raw.githubusercontent.com/Warshoow/grab-cli/master/grab
 chmod +x ~/.local/bin/grab
 ```
 
 Or clone this repo and symlink it:
 
 ```bash
-git clone https://github.com/Warshoow/grab.git
-ln -s "$PWD/grab/grab" ~/.local/bin/grab
+git clone https://github.com/Warshoow/grab-cli.git
+ln -s "$PWD/grab-cli/grab" ~/.local/bin/grab
 ```
 
 Requirements: `bash`, `git` (>= 2.25 for sparse-checkout cone mode).
