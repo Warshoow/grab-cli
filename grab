@@ -77,9 +77,9 @@ ensure_repo() {
     fi
 }
 
-get_default_branch() {
-    # Priority: .grabfile branch > GRAB_BRANCH env > global config
-    #          > origin/HEAD of the cached repo > "main"
+get_configured_branch() {
+    # Priority: .grabfile branch > GRAB_BRANCH env > global config.
+    # Prints nothing if no branch is configured.
     if [[ -f "$GRAB_FILE" ]]; then
         local b
         b=$(grep '^branch=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
@@ -94,9 +94,15 @@ get_default_branch() {
         b=$(grep '^branch=' "$GRAB_GLOBAL_CONFIG" | head -1 | cut -d'=' -f2-)
         [[ -n "$b" ]] && echo "$b" && return
     fi
-    # Try to detect from the cached repo's origin/HEAD
+    return 0
+}
+
+get_default_branch() {
+    # Configured branch > origin/HEAD of the cached repo > "main"
+    local b
+    b=$(get_configured_branch)
+    [[ -n "$b" ]] && echo "$b" && return
     if [[ -d "$GRAB_REPO_DIR/.git" ]]; then
-        local b
         b=$(git -C "$GRAB_REPO_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
         [[ -n "$b" ]] && echo "$b" && return
     fi
@@ -120,6 +126,32 @@ sync_repo() {
     )
 }
 
+# Put the cached repo on a pinned ref, or on the default branch if none.
+sync_ref() {
+    local ref="${1:-}"
+    if [[ -z "$ref" ]]; then
+        sync_repo
+        return
+    fi
+    (
+        cd "$GRAB_REPO_DIR"
+        git fetch origin "$ref" --quiet 2>/dev/null || die "Ref '${ref}' not found"
+        git checkout "$ref" --quiet 2>/dev/null || die "Failed to checkout ref '${ref}'"
+        # Pinned branch: move to its latest commit. No-op for a tag.
+        git pull origin "$ref" --quiet 2>/dev/null || true
+    )
+}
+
+# Copy a tool from the cached repo into the project.
+# Checks the source first so a missing tool never wipes the local copy.
+copy_tool() {
+    local tool="$1"
+    [[ -d "${GRAB_REPO_DIR}/${tool}" ]] || die "Tool '${tool}' not found in repo"
+    mkdir -p "${GRAB_DIR}/tools"
+    rm -rf "${GRAB_DIR}/tools/${tool}"
+    cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
+}
+
 # ── Grabfile management ──────────────────────────────────────
 grabfile_init() {
     local repo_url="$1"
@@ -140,7 +172,7 @@ grabfile_add() {
     fi
 
     # Check if already listed
-    if grep -q "^${tool}\b" "$GRAB_FILE" 2>/dev/null; then
+    if grabfile_has_tool "$tool"; then
         warn "${tool} already in .grabfile"
         return
     fi
@@ -158,21 +190,24 @@ grabfile_remove() {
     # Remove the line matching this tool
     local tmp
     tmp=$(mktemp)
-    grep -v "^${tool}\b" "$GRAB_FILE" > "$tmp" || true
+    awk -v t="$tool" '$1 != t' "$GRAB_FILE" > "$tmp"
     mv "$tmp" "$GRAB_FILE"
 }
 
 grabfile_list_tools() {
     if [[ ! -f "$GRAB_FILE" ]]; then return; fi
-    grep -v '^#' "$GRAB_FILE" | grep -v '^repo=' | grep -v '^\s*$' | awk '{print $1}'
+    awk '!/^#/ && !/^(repo|branch)=/ && NF {print $1}' "$GRAB_FILE"
+}
+
+# Exact match on the tool name (first field), not a regex prefix.
+grabfile_has_tool() {
+    [[ -f "$GRAB_FILE" ]] && grabfile_list_tools | grep -qxF "$1"
 }
 
 grabfile_get_ref() {
     local tool="$1"
     if [[ ! -f "$GRAB_FILE" ]]; then echo ""; return; fi
-    local line
-    line=$(grep "^${tool}\b" "$GRAB_FILE" | head -1)
-    echo "$line" | grep -oP '@\K\S+' || echo ""
+    awk -v t="$tool" '$1 == t { for (i = 2; i <= NF; i++) if ($i ~ /^@/) { print substr($i, 2); exit } }' "$GRAB_FILE"
 }
 
 # ── Gitignore management ────────────────────────────────────
@@ -232,7 +267,8 @@ run_hook() {
 
     if [[ "$auto" == "ask" ]]; then
         echo -e "${YELLOW}▸${NC} ${BOLD}${tool}${NC} has a post-grab hook: ${DIM}${GRAB_HOOK_FILE}${NC}"
-        read -rp "  Run it? [y/N] " confirm
+        # No terminal (CI, Docker build): read fails, treat as "no"
+        read -rp "  Run it? [y/N] " confirm || confirm=""
         [[ "$confirm" != [yY] ]] && return 0
     fi
 
@@ -255,7 +291,7 @@ cmd_init() {
 
     if [[ -f "$GRAB_FILE" ]]; then
         warn ".grabfile already exists"
-        read -rp "Overwrite? [y/N] " confirm
+        read -rp "Overwrite? [y/N] " confirm || confirm=""
         [[ "$confirm" != [yY] ]] && exit 0
     fi
 
@@ -289,38 +325,16 @@ cmd_add() {
 
     ensure_repo
 
-    # Sync to the right ref (sync_repo manages its own cwd via subshell)
-    if [[ -n "$ref" ]]; then
-        (
-            cd "$GRAB_REPO_DIR"
-            git fetch origin "$ref" --quiet 2>/dev/null || die "Ref '${ref}' not found"
-            git checkout "$ref" --quiet 2>/dev/null
-        )
-    else
-        sync_repo
-    fi
-
-    # Fetch & checkout the specific tool
-    cd "$GRAB_REPO_DIR"
+    sync_ref "$ref"
 
     # Check the tool exists in the repo
-    if ! git ls-tree -d HEAD "$tool" &>/dev/null; then
-        cd - > /dev/null
+    # (git ls-tree returns 0 even for a missing path — check for output.)
+    if [[ -z "$(git -C "$GRAB_REPO_DIR" ls-tree -d HEAD "$tool" 2>/dev/null)" ]]; then
         die "Tool '${tool}' not found in repo. Run ${BOLD}grab list --remote${NC} to see available tools."
     fi
 
-    # Add to sparse checkout
-    git sparse-checkout add "$tool" 2>/dev/null
-    cd - > /dev/null
-
-    # Copy tool to project
-    if [[ -d "${GRAB_REPO_DIR}/${tool}" ]]; then
-        mkdir -p "${GRAB_DIR}/tools"
-        rm -rf "${GRAB_DIR}/tools/${tool}"
-        cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
-    else
-        die "Tool directory not found after checkout"
-    fi
+    git -C "$GRAB_REPO_DIR" sparse-checkout add "$tool" 2>/dev/null
+    copy_tool "$tool"
 
     # Update grabfile & gitignore
     grabfile_add "$tool" "$ref"
@@ -364,63 +378,35 @@ cmd_remove() {
     success "Removed ${BOLD}${tool}${NC}"
 }
 
+# Sync one tool to its pinned ref (or the default branch) and copy it in.
+update_tool() {
+    local tool="$1"
+    sync_ref "$(grabfile_get_ref "$tool")"
+    (
+        cd "$GRAB_REPO_DIR"
+        git sparse-checkout add "$tool" 2>/dev/null
+        git read-tree -mu HEAD 2>/dev/null || true
+    )
+    copy_tool "$tool"
+}
+
 cmd_update() {
     local tool="${1:-}"
 
     ensure_repo
 
     if [[ -n "$tool" ]]; then
-        # Update single tool
-        if ! grep -q "^${tool}\b" "$GRAB_FILE" 2>/dev/null; then
-            die "Tool '${tool}' is not in .grabfile"
-        fi
-
-        local ref
-        ref=$(grabfile_get_ref "$tool")
-
-        if [[ -n "$ref" ]]; then
-            (
-                cd "$GRAB_REPO_DIR"
-                git fetch origin "$ref" --quiet 2>/dev/null
-                git checkout "$ref" --quiet 2>/dev/null
-                git pull origin "$ref" --quiet 2>/dev/null
-            )
-        else
-            sync_repo
-        fi
-
-        # Ensure the tool is in sparse-checkout and files are up to date
-        (
-            cd "$GRAB_REPO_DIR"
-            git sparse-checkout add "$tool" 2>/dev/null
-            git read-tree -mu HEAD 2>/dev/null || true
-        )
-
-        if [[ ! -d "${GRAB_REPO_DIR}/${tool}" ]]; then
-            die "Tool '${tool}' not found in repo after update"
-        fi
-
-        rm -rf "${GRAB_DIR}/tools/${tool}"
-        cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
+        grabfile_has_tool "$tool" || die "Tool '${tool}' is not in .grabfile"
+        update_tool "$tool"
         success "Updated ${BOLD}${tool}${NC}"
     else
-        # Update all tools
-        sync_repo
-
         local count=0
         while IFS= read -r t; do
             [[ -z "$t" ]] && continue
-            (
-                cd "$GRAB_REPO_DIR"
-                git sparse-checkout add "$t" 2>/dev/null
-            )
-            rm -rf "${GRAB_DIR}/tools/${t}"
-            cp -r "${GRAB_REPO_DIR}/${t}" "${GRAB_DIR}/tools/${t}"
+            update_tool "$t"
             info "Updated ${t}"
-            ((count++))
+            count=$((count+1))
         done <<< "$(grabfile_list_tools)"
-
-        ( cd "$GRAB_REPO_DIR" && git read-tree -mu HEAD 2>/dev/null || true )
 
         success "Updated ${BOLD}${count}${NC} tool(s)"
     fi
@@ -438,18 +424,7 @@ cmd_push() {
     ensure_repo
 
     # Sync repo to latest before pushing
-    local ref
-    ref=$(grabfile_get_ref "$tool")
-    if [[ -n "$ref" ]]; then
-        (
-            cd "$GRAB_REPO_DIR"
-            git fetch origin "$ref" --quiet 2>/dev/null
-            git checkout "$ref" --quiet 2>/dev/null
-            git pull origin "$ref" --quiet 2>/dev/null
-        )
-    else
-        sync_repo
-    fi
+    sync_ref "$(grabfile_get_ref "$tool")"
 
     # Ensure tool is in sparse-checkout
     (
@@ -477,7 +452,7 @@ cmd_push() {
 
     # Ask for commit message if not provided
     if [[ -z "$message" ]]; then
-        read -rp "$(echo -e "${CYAN}Commit message:${NC} ")" message
+        read -rp "$(echo -e "${CYAN}Commit message:${NC} ")" message || message=""
         [[ -z "$message" ]] && message="update ${tool}"
     fi
 
@@ -558,18 +533,17 @@ cmd_publish() {
 
     # Resolve the target branch: explicit config wins, else the repo's
     # actual default branch (origin/HEAD), else "main".
+    # Read the config here, in the project dir, not inside the clone.
     local branch
-    branch=$(get_default_branch)
+    branch=$(get_configured_branch)
     (
         cd "$tmp_repo"
         git sparse-checkout init --cone >/dev/null 2>&1
         git remote set-head origin --auto >/dev/null 2>&1 || true
-        if [[ ! -f "$GRAB_FILE" && -z "${GRAB_BRANCH:-}" ]] \
-           && ! grep -q '^branch=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null; then
+        if [[ -z "$branch" ]]; then
             # No branch configured anywhere: trust the repo's default.
-            local detected
-            detected=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
-            [[ -n "$detected" ]] && branch="$detected"
+            branch=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
+            [[ -z "$branch" ]] && branch="main"
         fi
         git fetch origin "$branch" --quiet 2>/dev/null \
             || die "Failed to fetch branch '${branch}' from ${repo_url}"
@@ -606,7 +580,7 @@ cmd_publish() {
     # Confirm before clobbering an existing tool.
     if [[ "$exists" == "yes" && "$force" != "yes" ]]; then
         warn "Tool '${name}' already exists in the repo and will be overwritten."
-        read -rp "  Continue? [y/N] " confirm
+        read -rp "  Continue? [y/N] " confirm || confirm=""
         [[ "$confirm" != [yY] ]] && { info "Aborted"; return; }
     fi
 
@@ -617,7 +591,7 @@ cmd_publish() {
     if [[ -z "$message" ]]; then
         local default_msg="add ${name}"
         [[ "$exists" == "yes" ]] && default_msg="update ${name}"
-        read -rp "$(echo -e "${CYAN}Commit message:${NC} ")" message
+        read -rp "$(echo -e "${CYAN}Commit message:${NC} ")" message || message=""
         [[ -z "$message" ]] && message="$default_msg"
     fi
 
@@ -654,32 +628,13 @@ cmd_install() {
     while IFS= read -r tool; do
         [[ -z "$tool" ]] && continue
 
-        local ref
+        update_tool "$tool"
+
+        local ref ref_info=""
         ref=$(grabfile_get_ref "$tool")
-
-        if [[ -n "$ref" ]]; then
-            (
-                cd "$GRAB_REPO_DIR"
-                git fetch origin "$ref" --quiet 2>/dev/null
-                git checkout "$ref" --quiet 2>/dev/null
-            )
-        else
-            sync_repo
-        fi
-
-        (
-            cd "$GRAB_REPO_DIR"
-            git sparse-checkout add "$tool" 2>/dev/null
-        )
-
-        mkdir -p "${GRAB_DIR}/tools"
-        rm -rf "${GRAB_DIR}/tools/${tool}"
-        cp -r "${GRAB_REPO_DIR}/${tool}" "${GRAB_DIR}/tools/${tool}"
-
-        local ref_info=""
         [[ -n "$ref" ]] && ref_info=" ${DIM}@${ref}${NC}"
         info "${tool}${ref_info}"
-        ((count++))
+        count=$((count+1))
     done <<< "$(grabfile_list_tools)"
 
     gitignore_ensure "$GRAB_DIR/"
@@ -697,31 +652,24 @@ cmd_list() {
 
     if [[ "$mode" == "--remote" || "$mode" == "-r" ]]; then
         ensure_repo
-        cd "$GRAB_REPO_DIR"
         sync_repo
-        cd - > /dev/null
 
         echo -e "${BOLD}Available tools:${NC}"
-        cd "$GRAB_REPO_DIR"
-        # List top-level directories (each is a tool)
-        for dir in */; do
-            [[ "$dir" == ".git/" ]] && continue
-            local name="${dir%/}"
+        # List top-level directories from git (each is a tool): the sparse
+        # checkout only has installed tools on disk.
+        local name
+        while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
             local installed=""
-            if [[ -d "$(cd - 2>/dev/null > /dev/null && echo "${GRAB_DIR}/tools/${name}")" ]]; then
-                installed=" ${GREEN}(installed)${NC}"
-            fi
-            # Check for a description in a README or TOOL.md
-            local desc=""
-            if [[ -f "${name}/TOOL.md" ]]; then
-                desc=$(head -1 "${name}/TOOL.md" | sed 's/^#\s*//')
-            elif [[ -f "${name}/README.md" ]]; then
-                desc=$(head -1 "${name}/README.md" | sed 's/^#\s*//')
-            fi
+            [[ -d "${GRAB_DIR}/tools/${name}" ]] && installed=" ${GREEN}(installed)${NC}"
+            # Description: first line of TOOL.md, else README.md
+            local desc
+            desc=$(git -C "$GRAB_REPO_DIR" show "HEAD:${name}/TOOL.md" 2>/dev/null \
+                || git -C "$GRAB_REPO_DIR" show "HEAD:${name}/README.md" 2>/dev/null || true)
+            desc=$(head -1 <<< "$desc" | sed 's/^#\s*//')
             echo -e "  ${CYAN}${name}${NC}${installed}"
             [[ -n "$desc" ]] && echo -e "    ${DIM}${desc}${NC}"
-        done
-        cd - > /dev/null
+        done <<< "$(git -C "$GRAB_REPO_DIR" ls-tree -d --name-only HEAD)"
     else
         if [[ ! -f "$GRAB_FILE" ]]; then
             die "No .grabfile found"
@@ -762,7 +710,7 @@ cmd_status() {
     local tool_count=0
     while IFS= read -r tool; do
         [[ -z "$tool" ]] && continue
-        ((tool_count++))
+        tool_count=$((tool_count+1))
     done <<< "$(grabfile_list_tools)"
 
     echo -e "  Tools:  ${BOLD}${tool_count}${NC} installed"
@@ -893,6 +841,9 @@ cmd_self_update() {
     fi
 
     success "Updated grab to ${BOLD}v${new_version}${NC}"
+    # The script file was just overwritten while bash is still reading it:
+    # exit now so bash never reads the rest from the new file.
+    exit 0
 }
 
 cmd_setup() {
@@ -929,7 +880,7 @@ EOF
 
     local prompt="Tools monorepo URL"
     [[ -n "$current_repo" ]] && prompt="Tools monorepo URL [${current_repo}]"
-    read -rp "$(echo -e "${CYAN}${prompt}:${NC} ")" input_repo
+    read -rp "$(echo -e "${CYAN}${prompt}:${NC} ")" input_repo || input_repo=""
     input_repo="${input_repo:-$current_repo}"
 
     local current_grab_repo=""
@@ -937,7 +888,7 @@ EOF
 
     local prompt2="Grab repo URL (for self-update)"
     [[ -n "$current_grab_repo" ]] && prompt2="Grab repo URL [${current_grab_repo}]"
-    read -rp "$(echo -e "${CYAN}${prompt2}:${NC} ")" input_grab_repo
+    read -rp "$(echo -e "${CYAN}${prompt2}:${NC} ")" input_grab_repo || input_grab_repo=""
     input_grab_repo="${input_grab_repo:-$current_grab_repo}"
 
     # Write config

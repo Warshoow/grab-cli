@@ -166,6 +166,8 @@ grab add devcontainer --no-hook    # skip the hook
 grab install --hook                # run all hooks without asking
 ```
 
+Without a terminal (CI, Docker build), the question gets no answer and the hook is skipped. Pass `--hook` to run it there.
+
 To run a hook manually at any time:
 
 ```bash
@@ -193,6 +195,10 @@ docker-utils @v2.1
 deploy-helper @main
 ```
 
+An optional `branch=` line sets the default branch for this project (see [Configuration](#configuration)).
+
+A pinned tool (`@ref`) stays on its ref: `grab install`, `grab update` and `grab push` all use it.
+
 Commit it to your project so collaborators can `grab install`.
 
 ## Configuration
@@ -203,11 +209,12 @@ Repo URLs are resolved in this order:
 2. `$GRAB_REPO` environment variable
 3. `~/.config/grab/config` (set via `grab setup`)
 
-The default branch used by `grab update` / `grab install` follows the same resolution (defaults to `main`):
+The default branch used by `grab update` / `grab install` / `grab publish` follows the same resolution:
 
 1. `.grabfile` (the `branch=` line)
 2. `$GRAB_BRANCH` environment variable
 3. `~/.config/grab/config` (the `branch=` line)
+4. the tools repo's own default branch (`origin/HEAD`), else `main`
 
 The global config file looks like:
 
@@ -220,7 +227,7 @@ branch=main
 
 - `repo` — your tools monorepo (default for `grab init`)
 - `grab_repo` — where the `grab` script lives, used by `grab self-update`
-- `branch` — default branch to track in the tools repo (optional, defaults to `main`)
+- `branch` — default branch to track in the tools repo (optional, defaults to the repo's default branch)
 
 ## Files grab creates
 
@@ -240,6 +247,14 @@ grab setup <tools-repo> <grab-repo>
 ```
 
 Then `grab self-update` will fetch the latest version, compare `GRAB_VERSION`, and replace itself in place (using `sudo` if necessary).
+
+## Tests
+
+```bash
+./test.sh
+```
+
+Runs the main commands against throwaway local repos (needs only `git` and `bash`).
 
 ## Troubleshooting
 
