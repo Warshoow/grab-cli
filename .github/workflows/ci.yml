@@ -1,0 +1,15 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Errors only: the warnings left are intended (trap quoting, eval'd checks)
+      - run: shellcheck -S error grab test.sh
+      - run: ./test.sh
