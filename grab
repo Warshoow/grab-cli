@@ -10,7 +10,7 @@ GRAB_DIR=".grab"
 GRAB_FILE=".grabfile"
 GRAB_REPO_DIR=".grab/.repo"
 GRAB_GLOBAL_CONFIG="${HOME}/.config/grab/config"
-GRAB_BIN="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+GRAB_BIN="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 
 # ── Colors ───────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -30,23 +30,19 @@ error()   { echo -e "${RED}✖${NC} $*" >&2; }
 die()     { error "$@"; exit 1; }
 
 # ── Config ───────────────────────────────────────────────────
+# Print the value of the first `key=` line in a file (nothing if absent).
+cfg() {
+    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$2" 2>/dev/null || true
+}
+
 get_repo_url() {
     # Priority: .grabfile repo > GRAB_REPO env > global config
-    if [[ -f "$GRAB_FILE" ]]; then
-        local url
-        url=$(grep '^repo=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
-        [[ -n "$url" ]] && echo "$url" && return
-    fi
-    if [[ -n "${GRAB_REPO:-}" ]]; then
-        echo "$GRAB_REPO"
-        return
-    fi
-    if [[ -f "$GRAB_GLOBAL_CONFIG" ]]; then
-        local url
-        url=$(grep '^repo=' "$GRAB_GLOBAL_CONFIG" | head -1 | cut -d'=' -f2-)
-        [[ -n "$url" ]] && echo "$url" && return
-    fi
-    die "No repo configured. Run: ${BOLD}grab init <repo-url>${NC}"
+    local url
+    url=$(cfg repo "$GRAB_FILE")
+    [[ -z "$url" ]] && url="${GRAB_REPO:-}"
+    [[ -z "$url" ]] && url=$(cfg repo "$GRAB_GLOBAL_CONFIG")
+    [[ -n "$url" ]] || die "No repo configured. Run: ${BOLD}grab init <repo-url>${NC}"
+    echo "$url"
 }
 
 ensure_repo() {
@@ -67,34 +63,18 @@ ensure_repo() {
         success "Repo initialized"
     else
         # Ensure remote URL is up to date
-        cd "$GRAB_REPO_DIR"
-        local current_url
-        current_url=$(git remote get-url origin 2>/dev/null || true)
-        if [[ "$current_url" != "$repo_url" ]]; then
-            git remote set-url origin "$repo_url"
-        fi
-        cd - > /dev/null
+        git -C "$GRAB_REPO_DIR" remote set-url origin "$repo_url"
     fi
 }
 
 get_configured_branch() {
     # Priority: .grabfile branch > GRAB_BRANCH env > global config.
     # Prints nothing if no branch is configured.
-    if [[ -f "$GRAB_FILE" ]]; then
-        local b
-        b=$(grep '^branch=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
-        [[ -n "$b" ]] && echo "$b" && return
-    fi
-    if [[ -n "${GRAB_BRANCH:-}" ]]; then
-        echo "$GRAB_BRANCH"
-        return
-    fi
-    if [[ -f "$GRAB_GLOBAL_CONFIG" ]]; then
-        local b
-        b=$(grep '^branch=' "$GRAB_GLOBAL_CONFIG" | head -1 | cut -d'=' -f2-)
-        [[ -n "$b" ]] && echo "$b" && return
-    fi
-    return 0
+    local b
+    b=$(cfg branch "$GRAB_FILE")
+    [[ -z "$b" ]] && b="${GRAB_BRANCH:-}"
+    [[ -z "$b" ]] && b=$(cfg branch "$GRAB_GLOBAL_CONFIG")
+    echo "$b"
 }
 
 get_default_branch() {
@@ -119,8 +99,8 @@ sync_repo() {
         if ! git fetch origin "$branch" --quiet 2>/dev/null; then
             die "Failed to fetch branch '${branch}' from origin. Set the right branch in .grabfile (branch=...) or via GRAB_BRANCH."
         fi
-        git checkout "$branch" --quiet 2>/dev/null \
-            || git checkout -b "$branch" "origin/${branch}" --quiet 2>/dev/null \
+        # `--`: a tool folder named like the branch would make it ambiguous
+        git checkout "$branch" --quiet -- 2>/dev/null \
             || die "Failed to checkout branch '${branch}'"
         git pull origin "$branch" --quiet 2>/dev/null || true
     )
@@ -136,7 +116,7 @@ sync_ref() {
     (
         cd "$GRAB_REPO_DIR"
         git fetch origin "$ref" --quiet 2>/dev/null || die "Ref '${ref}' not found"
-        git checkout "$ref" --quiet 2>/dev/null || die "Failed to checkout ref '${ref}'"
+        git checkout "$ref" --quiet -- 2>/dev/null || die "Failed to checkout ref '${ref}'"
         # Pinned branch: move to its latest commit. No-op for a tag.
         git pull origin "$ref" --quiet 2>/dev/null || true
     )
@@ -224,28 +204,6 @@ gitignore_ensure() {
             echo "# grab" >> "$gitignore"
         fi
         echo "$entry" >> "$gitignore"
-    fi
-}
-
-gitignore_remove() {
-    local entry="$1"
-    local gitignore=".gitignore"
-    [[ ! -f "$gitignore" ]] && return
-
-    local tmp
-    tmp=$(mktemp)
-    grep -vxF "$entry" "$gitignore" > "$tmp" || true
-    mv "$tmp" "$gitignore"
-
-    # Clean up empty grab section
-    if grep -q "# grab" ".gitignore" 2>/dev/null; then
-        local after_grab
-        after_grab=$(sed -n '/# grab/,$ p' ".gitignore" | tail -n +2 | grep -v '^\s*$' | wc -l)
-        if [[ "$after_grab" -eq 0 ]]; then
-            tmp=$(mktemp)
-            sed '/# grab/d' ".gitignore" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "$tmp"
-            mv "$tmp" ".gitignore"
-        fi
     fi
 }
 
@@ -360,19 +318,9 @@ cmd_remove() {
     grabfile_remove "$tool"
 
     # Clean sparse checkout
+    # Rebuild from remaining tools (none left = top-level files only)
     if [[ -d "$GRAB_REPO_DIR/.git" ]]; then
-        cd "$GRAB_REPO_DIR"
-        # Rebuild sparse-checkout from remaining tools
-        local remaining
-        remaining=$(cd - > /dev/null && grabfile_list_tools | tr '\n' ' ')
-        if [[ -z "$remaining" ]]; then
-            # Reset to empty cone (top-level files only)
-            git sparse-checkout reapply 2>/dev/null
-            git sparse-checkout set 2>/dev/null || true
-        else
-            git sparse-checkout set $remaining 2>/dev/null
-        fi
-        cd - > /dev/null
+        git -C "$GRAB_REPO_DIR" sparse-checkout set $(grabfile_list_tools) 2>/dev/null
     fi
 
     success "Removed ${BOLD}${tool}${NC}"
@@ -382,11 +330,7 @@ cmd_remove() {
 update_tool() {
     local tool="$1"
     sync_ref "$(grabfile_get_ref "$tool")"
-    (
-        cd "$GRAB_REPO_DIR"
-        git sparse-checkout add "$tool" 2>/dev/null
-        git read-tree -mu HEAD 2>/dev/null || true
-    )
+    git -C "$GRAB_REPO_DIR" sparse-checkout add "$tool" 2>/dev/null
     copy_tool "$tool"
 }
 
@@ -427,11 +371,7 @@ cmd_push() {
     sync_ref "$(grabfile_get_ref "$tool")"
 
     # Ensure tool is in sparse-checkout
-    (
-        cd "$GRAB_REPO_DIR"
-        git sparse-checkout add "$tool" 2>/dev/null
-        git read-tree -mu HEAD 2>/dev/null || true
-    )
+    git -C "$GRAB_REPO_DIR" sparse-checkout add "$tool" 2>/dev/null
 
     # Copy local changes into the repo cache
     rm -rf "${GRAB_REPO_DIR}/${tool}"
@@ -547,8 +487,7 @@ cmd_publish() {
         fi
         git fetch origin "$branch" --quiet 2>/dev/null \
             || die "Failed to fetch branch '${branch}' from ${repo_url}"
-        git checkout "$branch" --quiet 2>/dev/null \
-            || git checkout -b "$branch" "origin/${branch}" --quiet 2>/dev/null \
+        git checkout "$branch" --quiet -- 2>/dev/null \
             || die "Failed to checkout branch '${branch}'"
         git sparse-checkout add "$name" >/dev/null 2>&1
     )
@@ -700,18 +639,15 @@ cmd_status() {
 
     if [[ -f "$GRAB_FILE" ]]; then
         local repo_url
-        repo_url=$(grep '^repo=' "$GRAB_FILE" | head -1 | cut -d'=' -f2-)
+        repo_url=$(cfg repo "$GRAB_FILE")
         echo -e "  Repo:   ${CYAN}${repo_url}${NC}"
     else
         echo -e "  ${DIM}No .grabfile found${NC}"
         return
     fi
 
-    local tool_count=0
-    while IFS= read -r tool; do
-        [[ -z "$tool" ]] && continue
-        tool_count=$((tool_count+1))
-    done <<< "$(grabfile_list_tools)"
+    # $(( )) trims the leading spaces BSD wc prints
+    local tool_count=$(( $(grabfile_list_tools | wc -l) ))
 
     echo -e "  Tools:  ${BOLD}${tool_count}${NC} installed"
     echo -e "  Dir:    ${GRAB_DIR}/tools/"
@@ -786,12 +722,9 @@ cmd_clean() {
 }
 
 cmd_self_update() {
-    local source=""
-
-    # Check global config for grab's own repo
-    if [[ -f "$GRAB_GLOBAL_CONFIG" ]]; then
-        source=$(grep '^grab_repo=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
-    fi
+    # Global config for grab's own repo
+    local source
+    source=$(cfg grab_repo "$GRAB_GLOBAL_CONFIG")
 
     # Fallback to env
     [[ -z "$source" ]] && source="${GRAB_SELF_REPO:-}"
@@ -808,15 +741,8 @@ cmd_self_update() {
     git clone --depth 1 "$source" "$tmp_dir/grab" 2>/dev/null \
         || die "Failed to clone from ${source}"
 
-    # Find the grab script at repo root
-    local new_grab=""
-    if [[ -f "$tmp_dir/grab/grab" ]]; then
-        new_grab="$tmp_dir/grab/grab"
-    elif [[ -f "$tmp_dir/grab/grab.sh" ]]; then
-        new_grab="$tmp_dir/grab/grab.sh"
-    fi
-
-    [[ -z "$new_grab" ]] && die "Could not find grab script at repo root"
+    local new_grab="$tmp_dir/grab/grab"
+    [[ -f "$new_grab" ]] || die "Could not find grab script at repo root"
 
     # Compare versions
     local new_version
@@ -847,8 +773,12 @@ cmd_self_update() {
 }
 
 cmd_setup() {
-    local tools_url="${1:-}"
-    local grab_url="${2:-}"
+    # Non-interactive: grab setup <tools-repo> [grab-repo]
+    local input_repo="${1:-}"
+    local input_grab_repo="${2:-}"
+    # branch= is not asked here, but must survive the rewrite
+    local branch
+    branch=$(cfg branch "$GRAB_GLOBAL_CONFIG")
 
     mkdir -p "$(dirname "$GRAB_GLOBAL_CONFIG")"
 
@@ -858,47 +788,36 @@ cmd_setup() {
         echo ""
     fi
 
-    if [[ -n "$tools_url" ]]; then
-        # Non-interactive: grab setup <tools-repo> [grab-repo]
-        cat > "$GRAB_GLOBAL_CONFIG" <<EOF
-# grab global configuration
-repo=${tools_url}
-grab_repo=${grab_url:-}
-EOF
-        success "Global config saved to ${CYAN}${GRAB_GLOBAL_CONFIG}${NC}"
-        echo ""
-        echo -e "${DIM}# Config file:${NC}"
-        cat "$GRAB_GLOBAL_CONFIG"
-        return
+    if [[ -z "$input_repo" ]]; then
+        # Interactive setup
+        echo -e "${BOLD}grab setup${NC}\n"
+
+        local current_repo
+        current_repo=$(cfg repo "$GRAB_GLOBAL_CONFIG")
+        local prompt="Tools monorepo URL"
+        [[ -n "$current_repo" ]] && prompt="Tools monorepo URL [${current_repo}]"
+        read -rp "$(echo -e "${CYAN}${prompt}:${NC} ")" input_repo || input_repo=""
+        input_repo="${input_repo:-$current_repo}"
+
+        local current_grab_repo
+        current_grab_repo=$(cfg grab_repo "$GRAB_GLOBAL_CONFIG")
+        local prompt2="Grab repo URL (for self-update)"
+        [[ -n "$current_grab_repo" ]] && prompt2="Grab repo URL [${current_grab_repo}]"
+        read -rp "$(echo -e "${CYAN}${prompt2}:${NC} ")" input_grab_repo || input_grab_repo=""
+        input_grab_repo="${input_grab_repo:-$current_grab_repo}"
     fi
 
-    # Interactive setup
-    echo -e "${BOLD}grab setup${NC}\n"
-
-    local current_repo=""
-    [[ -f "$GRAB_GLOBAL_CONFIG" ]] && current_repo=$(grep '^repo=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
-
-    local prompt="Tools monorepo URL"
-    [[ -n "$current_repo" ]] && prompt="Tools monorepo URL [${current_repo}]"
-    read -rp "$(echo -e "${CYAN}${prompt}:${NC} ")" input_repo || input_repo=""
-    input_repo="${input_repo:-$current_repo}"
-
-    local current_grab_repo=""
-    [[ -f "$GRAB_GLOBAL_CONFIG" ]] && current_grab_repo=$(grep '^grab_repo=' "$GRAB_GLOBAL_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
-
-    local prompt2="Grab repo URL (for self-update)"
-    [[ -n "$current_grab_repo" ]] && prompt2="Grab repo URL [${current_grab_repo}]"
-    read -rp "$(echo -e "${CYAN}${prompt2}:${NC} ")" input_grab_repo || input_grab_repo=""
-    input_grab_repo="${input_grab_repo:-$current_grab_repo}"
-
-    # Write config
-    cat > "$GRAB_GLOBAL_CONFIG" <<EOF
-# grab global configuration
-repo=${input_repo}
-grab_repo=${input_grab_repo}
-EOF
+    {
+        echo "# grab global configuration"
+        echo "repo=${input_repo}"
+        echo "grab_repo=${input_grab_repo}"
+        if [[ -n "$branch" ]]; then echo "branch=${branch}"; fi
+    } > "$GRAB_GLOBAL_CONFIG"
 
     success "Global config saved to ${CYAN}${GRAB_GLOBAL_CONFIG}${NC}"
+    echo ""
+    echo -e "${DIM}# Config file:${NC}"
+    cat "$GRAB_GLOBAL_CONFIG"
 }
 
 cmd_help() {

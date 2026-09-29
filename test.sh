@@ -66,5 +66,39 @@ echo "branch=dev" >> .grabfile
 g publish newtool -m pub
 check "publish follows .grabfile branch" 'git -C "$T/tools.git" ls-tree --name-only dev | grep -qx newtool && ! git -C "$T/tools.git" ls-tree --name-only main | grep -qx newtool'
 
+cd "$T/p"
+out=$(bash "$GRAB" status 2>&1)
+check "status counts tools" 'grep -q "Tools:.*3" <<< "$out"'
+
+git -C "$T/src" checkout -q main
+echo NEW > "$T/src/foo-bar/README.md"
+git -C "$T/src" commit -qam new && git -C "$T/src" push -q "$T/tools.git" main
+g update
+check "update pulls new commits" 'grep -q NEW .grab/tools/foo-bar/README.md'
+
+g remove foo-bar && g remove foo; g remove hooked; rc=$?
+check "removing the last tool resets sparse checkout" '[[ $rc == 0 && -z "$(git -C .grab/.repo sparse-checkout list)" ]]'
+
+git clone -q --bare "$T/tools.git" "$T/tools2.git"
+sed -i.bak "s#^repo=.*#repo=file://$T/tools2.git#" .grabfile
+g add foo --no-hook
+check "cache follows a new repo URL" '[[ "$(git -C .grab/.repo remote get-url origin)" == "file://$T/tools2.git" ]]'
+
+# A tool folder named like the pinned branch must not confuse checkout
+mkdir "$T/src/dev" && echo d > "$T/src/dev/a"
+git -C "$T/src" add -A && git -C "$T/src" commit -qm dev-tool && git -C "$T/src" push -q "$T/tools.git" main
+mkdir "$T/p3" && cd "$T/p3" && g init "$REPO"
+g add dev --no-hook
+g add foo @dev --no-hook; rc=$?
+check "ref named like a tool folder" '[[ $rc == 0 ]] && grep -q DEV .grab/tools/foo/README.md'
+
+# Global config tests last: they change $HOME/.config/grab/config
+mkdir -p "$HOME/.config/grab"
+printf 'repo=x\ngrab_repo=%s\nbranch=dev\n' "$T/nope" > "$HOME/.config/grab/config"
+out=$(bash "$GRAB" self-update 2>&1)
+check "self-update reads grab_repo" 'grep -q "Failed to clone from $T/nope" <<< "$out"'
+g setup a b
+check "setup keeps branch=" 'grep -qx branch=dev "$HOME/.config/grab/config" && grep -qx repo=a "$HOME/.config/grab/config"'
+
 echo
 [[ $fails == 0 ]] && echo "all passed" || { echo "$fails failed"; exit 1; }
