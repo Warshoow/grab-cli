@@ -100,5 +100,11 @@ check "self-update reads grab_repo" 'grep -q "Failed to clone from $T/nope" <<< 
 g setup a b
 check "setup keeps branch=" 'grep -qx branch=dev "$HOME/.config/grab/config" && grep -qx repo=a "$HOME/.config/grab/config"'
 
+mkdir -p .grab/victim
+g remove ../victim
+check "remove refuses a name that leaves .grab/tools" '[[ -d .grab/victim ]]'
+g add ../victim --no-hook; rc=$?
+check "add refuses a name that leaves .grab/tools" '[[ $rc != 0 && -d .grab/victim ]]'
+
 echo
 [[ $fails == 0 ]] && echo "all passed" || { echo "$fails failed"; exit 1; }

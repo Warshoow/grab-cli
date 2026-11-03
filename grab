@@ -28,6 +28,9 @@ success() { echo -e "${GREEN}✔${NC} $*"; }
 warn()    { echo -e "${YELLOW}⚠${NC} $*"; }
 error()   { echo -e "${RED}✖${NC} $*" >&2; }
 die()     { error "$@"; exit 1; }
+# A tool name becomes a path under .grab/tools and the repo cache, then gets rm -rf'd.
+# It can come from a cloned project's .grabfile: refuse anything that leaves that folder.
+check_tool_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "Invalid tool name '$1'"; }
 
 # ── Config ───────────────────────────────────────────────────
 # Print the value of the first `key=` line in a file (nothing if absent).
@@ -126,6 +129,7 @@ sync_ref() {
 # Checks the source first so a missing tool never wipes the local copy.
 copy_tool() {
     local tool="$1"
+    check_tool_name "$tool"
     [[ -d "${GRAB_REPO_DIR}/${tool}" ]] || die "Tool '${tool}' not found in repo"
     mkdir -p "${GRAB_DIR}/tools"
     rm -rf "${GRAB_DIR}/tools/${tool}"
@@ -309,6 +313,7 @@ cmd_add() {
 cmd_remove() {
     local tool="${1:-}"
     [[ -z "$tool" ]] && die "Usage: ${BOLD}grab remove <tool>${NC}"
+    check_tool_name "$tool"
 
     if [[ ! -d "${GRAB_DIR}/tools/${tool}" ]]; then
         die "Tool '${tool}' is not installed"
@@ -360,6 +365,7 @@ cmd_push() {
     local tool="${1:-}"
     local message="${2:-}"
     [[ -z "$tool" ]] && die "Usage: ${BOLD}grab push <tool> [\"commit message\"]${NC}"
+    check_tool_name "$tool"
 
     if [[ ! -d "${GRAB_DIR}/tools/${tool}" ]]; then
         die "Tool '${tool}' is not installed"
@@ -443,6 +449,7 @@ cmd_publish() {
 
     # Default tool name = source folder basename.
     [[ -z "$name" ]] && name="$(basename "$src")"
+    check_tool_name "$name"
 
     # Tool name must be a single top-level directory in the repo.
     if [[ "$name" == */* || "$name" == "." || "$name" == ".." ]]; then
