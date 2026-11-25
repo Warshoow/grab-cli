@@ -103,9 +103,11 @@ sync_repo() {
             die "Failed to fetch branch '${branch}' from origin. Set the right branch in .grabfile (branch=...) or via GRAB_BRANCH."
         fi
         # `--`: a tool folder named like the branch would make it ambiguous
-        git checkout "$branch" --quiet -- 2>/dev/null \
+        # The cache is disposable: -f and reset drop leftovers (e.g. a failed grab push)
+        # that would otherwise make every later update fail silently.
+        git checkout -f "$branch" --quiet -- 2>/dev/null \
             || die "Failed to checkout branch '${branch}'"
-        git pull origin "$branch" --quiet 2>/dev/null || true
+        git reset --hard FETCH_HEAD --quiet
     )
 }
 
@@ -119,9 +121,9 @@ sync_ref() {
     (
         cd "$GRAB_REPO_DIR"
         git fetch origin "$ref" --quiet 2>/dev/null || die "Ref '${ref}' not found"
-        git checkout "$ref" --quiet -- 2>/dev/null || die "Failed to checkout ref '${ref}'"
+        git checkout -f "$ref" --quiet -- 2>/dev/null || die "Failed to checkout ref '${ref}'"
         # Pinned branch: move to its latest commit. No-op for a tag.
-        git pull origin "$ref" --quiet 2>/dev/null || true
+        git reset --hard FETCH_HEAD --quiet
     )
 }
 

@@ -76,6 +76,13 @@ git -C "$T/src" commit -qam new && git -C "$T/src" push -q "$T/tools.git" main
 g update
 check "update pulls new commits" 'grep -q NEW .grab/tools/foo-bar/README.md'
 
+# Leftovers in the cache (e.g. a failed grab push) must not freeze it
+echo DIRTY > .grab/.repo/foo-bar/README.md
+echo NEWER > "$T/src/foo-bar/README.md"
+git -C "$T/src" commit -qam newer && git -C "$T/src" push -q "$T/tools.git" main
+g update
+check "update ignores leftovers in the cache" 'grep -q NEWER .grab/tools/foo-bar/README.md'
+
 g remove foo-bar && g remove foo; g remove hooked; rc=$?
 check "removing the last tool resets sparse checkout" '[[ $rc == 0 && -z "$(git -C .grab/.repo sparse-checkout list)" ]]'
 
